@@ -29,7 +29,16 @@ class GeminiClient:
 
         try:
             genai.configure(api_key=self.api_key)
-            self.model = genai.GenerativeModel('gemini-2.5-flash')
+            self.safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
+            self.model = genai.GenerativeModel(
+                'gemini-2.5-flash',
+                safety_settings=self.safety_settings
+            )
             logger.info("Gemini client initialized successfully")
         except Exception as e:
             logger.error(f"Error initializing Gemini client: {e}")
@@ -48,11 +57,20 @@ class GeminiClient:
             else:
                 full_prompt = text
 
-            response = self.model.generate_content(full_prompt)
+            response = self.model.generate_content(
+                full_prompt,
+                safety_settings=self.safety_settings
+            )
             return response.text.strip()
 
         except Exception as e:
             logger.error(f"Error analyzing text: {e}")
+            # Check for block reason
+            try:
+                if e.response.prompt_feedback.block_reason:
+                    return "콘텐츠가 안전 정책에 의해 차단되었습니다."
+            except AttributeError:
+                pass
             return f"분석 중 오류가 발생했습니다: {str(e)}"
 
     def analyze_image(self, image_data: bytes, mime_type: str = "image/jpeg") -> str:
@@ -68,7 +86,7 @@ class GeminiClient:
             response = self.model.generate_content([
                 prompt,
                 {"mime_type": mime_type, "data": image_data}
-            ])
+            ], safety_settings=self.safety_settings)
 
             return response.text.strip()
 
@@ -89,7 +107,7 @@ class GeminiClient:
             response = self.model.generate_content([
                 prompt,
                 {"mime_type": mime_type, "data": audio_data}
-            ])
+            ], safety_settings=self.safety_settings)
 
             return response.text.strip()
 
@@ -113,7 +131,7 @@ class GeminiClient:
 
 요약:"""
 
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(prompt, safety_settings=self.safety_settings)
             return response.text.strip()
 
         except Exception as e:
@@ -129,14 +147,9 @@ class GeminiClient:
 
         try:
             prompt = f"""다음 텍스트에서 핵심 포인트들을 추출해주세요.
-각 포인트를bullet point 형식으로 정리해주세요.
+각 포인트를bullet point 형식으로 정리해주세요.\n\n텍스트:\n{text}\n\n핵심 포인트:"""
 
-텍스트:
-{text}
-
-핵심 포인트:"""
-
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(prompt, safety_settings=self.safety_settings)
             return response.text.strip()
 
         except Exception as e:
@@ -152,14 +165,9 @@ class GeminiClient:
 
         try:
             prompt = f"""다음 텍스트를 {target_language}로 번역해주세요.
-자연스럽고 정확한 번역을 제공해주세요.
+자연스럽고 정확한 번역을 제공해주세요.\n\n텍스트:\n{text}\n\n번역:"""
 
-텍스트:
-{text}
-
-번역:"""
-
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(prompt, safety_settings=self.safety_settings)
             return response.text.strip()
 
         except Exception as e:
@@ -175,14 +183,9 @@ class GeminiClient:
 
         try:
             prompt = f"""다음 텍스트의 감정을 분석해주세요.
-긍정/부정/중립과 주요 감정을 설명해주세요.
+긍정/부정/중립과 주요 감정을 설명해주세요.\n\n텍스트:\n{text}\n\n감정 분석:"""
 
-텍스트:
-{text}
-
-감정 분석:"""
-
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(prompt, safety_settings=self.safety_settings)
             return response.text.strip()
 
         except Exception as e:
@@ -245,3 +248,89 @@ def analyze_sentiment(text: str) -> str:
     """Quick sentiment analysis"""
     client = get_gemini_client()
     return client.analyze_sentiment(text)
+
+# === [AUTO-INJECT] safe gemini wrapper ===
+from typing import Tuple, Dict, Any
+
+def _is_blocked(resp_or_err: Any) -> Tuple[bool, str]:
+    """
+    Gemini 응답/예외에서 '안전 차단'을 최대한 정확히 감지.
+    실제 SDK별 필드가 다를 수 있으므로 보수적으로 처리.
+    리턴: (blocked, reason)
+    """
+    try:
+        # google.generativeai 응답 객체
+        # 1) prompt_feedback
+        pf = getattr(resp_or_err, "prompt_feedback", None)
+        if pf and getattr(pf, "block_reason", None):
+            return True, str(pf.block_reason)
+        # 2) finish_reason
+        cand0 = getattr(resp_or_err, "candidates", [None])[0]
+        fr = getattr(cand0, "finish_reason", None)
+        if fr and str(fr).lower().find("safety") >= 0:
+            return True, str(fr)
+        # 3) safety_ratings 안에 "blocked" 유사 키워드가 있을 때
+        sr = getattr(cand0, "safety_ratings", None)
+        if sr:
+            s = str(sr).lower()
+            if "block" in s or "unsafe" in s:
+                return True, "safety_ratings"
+    except Exception:
+        pass
+
+    # 예외 객체에 safety/blocked 단어가 들어간 경우
+    try:
+        msg = str(resp_or_err).lower()
+        if any(k in msg for k in ["safety", "blocked", "blocked_reason"]):
+            return True, msg
+    except Exception:
+        pass
+
+    return False, ""
+
+def generate_text_safe(prompt: str, *, temperature: float = 0.2, max_tokens: int = 2048) -> Dict[str, Any]:
+    """
+    차단은 'blocked=True'로 명시하고, 일반 에러는 'error'로 구분해서 리턴.
+    호출측은 메시지를 분기 처리 가능.
+    """
+    import google.generativeai as genai
+
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
+
+    order = ["gemini-1.5-flash", "gemini-1.5-pro"]
+    last_err = None
+    for model_name in order:
+        try:
+            model = genai.GenerativeModel(
+                model_name,
+                safety_settings=safety_settings
+            )
+            resp = model.generate_content(
+                prompt,
+                generation_config={"temperature": temperature, "max_output_tokens": max_tokens},
+            )
+            blocked, reason = _is_blocked(resp)
+            if blocked:
+                return {"ok": False, "blocked": True, "reason": reason, "text": ""}
+            # 정상 텍스트 추출
+            text = ""
+            try:
+                text = getattr(resp, "text", None) or resp.candidates[0].content.parts[0].text
+            except Exception:
+                text = str(resp)
+            return {"ok": True, "blocked": False, "reason": "", "text": text}
+        except Exception as e:
+            # 차단인지 일반 오류인지 구분
+            blocked, reason = _is_blocked(e)
+            if blocked:
+                return {"ok": False, "blocked": True, "reason": reason or str(e), "text": ""}
+            last_err = e
+            continue
+    # 모든 모델 실패(일반 에러)
+    return {"ok": False, "blocked": False, "reason": str(last_err or "unknown"), "text": ""}
+# === [/AUTO-INJECT] ===

@@ -21,12 +21,7 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-# Load environment variables from .env file
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+
 
 import google.generativeai as genai
 # === [AUTO-INJECT] base utils ===
@@ -70,7 +65,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # =============================================================================
 
 # Core settings
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8288922587:AAHUADrjbeLFSTxS_Hx6jEDEbAW88dOzgNY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8288922587:AAHUADrjbeLFSTxS_Hx6jEDEbAW88dOzgNY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAP8A5YjpwqOkHo0YLhXUMdzFubYoWSwMk")
 OWNER_ID = os.getenv("OWNER_ID", "5833561465")
 
@@ -112,9 +107,16 @@ try:
         "top_p": 0.9,
         "max_output_tokens": int(os.getenv("GEN_MAX_OUTPUT_TOKENS", "1024")),
     }
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
     model = genai.GenerativeModel(
         'gemini-2.5-flash',
-        generation_config=generation_config
+        generation_config=generation_config,
+        safety_settings=safety_settings
     )
     logger.info("✅ Gemini AI initialized (gemini-2.5-flash with enhanced config)")
 except Exception as e:
@@ -184,11 +186,26 @@ def safe_generate(prompt: str, retries: int = 2, parts=None, stream: bool = Fals
         try:
             logger.debug(f"Safe_generate attempt {attempt + 1}/{max_retries + 1}")
 
+            safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
             # Generate content
             if parts:
-                r = model.generate_content(prompt, parts=parts, stream=stream)
+                r = model.generate_content(
+                    prompt, 
+                    parts=parts, 
+                    stream=stream,
+                    safety_settings=safety_settings
+                )
             else:
-                r = model.generate_content(prompt, stream=stream)
+                r = model.generate_content(
+                    prompt, 
+                    stream=stream,
+                    safety_settings=safety_settings
+                )
 
             # Extract text
             if stream:
@@ -508,6 +525,24 @@ async def set_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"User {user_id} changed mode to {new_mode}")
     else:
         await update.message.reply_text("❌ 잘못된 모드입니다. 사용법: /mode auto|chat|analyze")
+
+
+# === [AUTO-INJECT] telegram short-circuit ===
+def _is_smalltalk(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in {"hi", "hello", "안녕", "ㅎㅇ", "하이"} or (len(t) <= 5 and any(k in t for k in ["안녕","hi","ㅎㅇ","하이"]))
+
+def handle_incoming_text(text: str) -> str:
+    """
+    기존 파이프라인 진입 전, 짧은 인삿말/단문은 직접 응답으로 처리.
+    """
+    if not text or not text.strip():
+        return "내용이 비어 있어요. 분석할 텍스트를 보내주세요."
+    if _is_smalltalk(text):
+        return "안녕하세요! 무엇을 도와드릴까요? 😊"
+    # 길면 기존 Map-Reduce/요약 파이프라인으로
+    return None  # None이면 이후 요약 로직으로 진행
+# === [/AUTO-INJECT] ===
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1081,7 +1116,7 @@ def main():
     logger.info("✅ 모든 모듈 초기화 완료")
     logger.info("📡 Telegram 봇 폴링 시작...")
     logger.info("=" * 60)
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == '__main__':
