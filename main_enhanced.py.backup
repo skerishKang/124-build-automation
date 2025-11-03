@@ -1,0 +1,1046 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🤖 AI 자동화 허브 - 통합 버전
+Telegram + Google Drive + Gmail + Calendar + Notion + Slack + n8n + Gemini AI
+
+모든 자동화 모듈을 하나의 프로그램으로 통합 실행
+"""
+
+import os
+import logging
+import tempfile
+import subprocess
+import threading
+import time
+import json
+import re
+import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from typing import Optional
+from zoneinfo import ZoneInfo
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+import google.generativeai as genai
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ApplicationBuilder
+
+# Google Drive API imports
+try:
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload
+    import io
+except ImportError:
+    logger = logging.getLogger(__name__)
+    logger.warning("Google Drive libraries not installed. Drive functionality will be disabled.")
+
+# Configure logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('automation_hub.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Reduce httpx logging noise
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+# =============================================================================
+# ENVIRONMENT VARIABLES
+# =============================================================================
+
+# Core settings
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8288922587:AAHUADrjbeLFSTxS_Hx6jEDEbAW88dOzgNY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAP8A5YjpwqOkHo0YLhXUMdzFubYoWSwMk")
+OWNER_ID = os.getenv("OWNER_ID", "5833561465")
+
+# Google Drive settings
+GOOGLE_SERVICE_JSON_PATH = os.getenv("GOOGLE_SERVICE_JSON_PATH", "service_account.json")
+DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "")
+
+# Gmail settings
+GMAIL_CLIENT_SECRET_PATH = os.getenv("GMAIL_CLIENT_SECRET_PATH", "gmail_credentials.json")
+GMAIL_TOKEN_PATH = os.getenv("GMAIL_TOKEN_PATH", "gmail_token.json")
+
+# Calendar settings
+GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
+
+# Notion settings
+NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "")
+
+# Slack settings
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
+SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID", "")
+
+# n8n settings
+N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "")
+N8N_API_KEY = os.getenv("N8N_API_KEY", "")
+
+# Processed files tracking
+PROCESSED_FILES_DB = "processed_files.json"
+
+# =============================================================================
+# GEMINI AI SETUP
+# =============================================================================
+
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    # Enhanced generation config for stability and performance
+    generation_config = {
+        "temperature": float(os.getenv("GEN_TEMPERATURE", "0.2")),
+        "top_p": 0.9,
+        "max_output_tokens": int(os.getenv("GEN_MAX_OUTPUT_TOKENS", "1024")),
+    }
+    model = genai.GenerativeModel(
+        'gemini-2.5-flash',
+        generation_config=generation_config
+    )
+    logger.info("✅ Gemini AI initialized (gemini-2.5-flash with enhanced config)")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize Gemini: {e}")
+    model = None
+
+# =============================================================================
+# ENHANCED UTILITIES
+# =============================================================================
+
+def extract_gemini_text(resp) -> str:
+    """Gemini 응답에서 text만 안전 추출."""
+    try:
+        if not resp:
+            return ""
+
+        # finish_reason 확인 (0=OK, 1=SAFETY, 2=OTHER)
+        if hasattr(resp, 'prompt_feedback'):
+            prompt_feedback = resp.prompt_feedback
+            if hasattr(prompt_feedback, 'block_reason'):
+                block_reason = prompt_feedback.block_reason
+                logger.warning(f"Gemini response blocked: {block_reason}")
+                return "콘텐츠가 안전 정책에 의해 차단되었습니다. 다른 질문을 시도해주세요."
+
+        # finish_reason이 2(Safety) 또는 다른 오류 상태인지 체크
+        if hasattr(resp, 'candidates'):
+            if not resp.candidates:
+                logger.warning("No candidates in Gemini response")
+                return "응답을 생성할 수 없습니다. 다른 질문을 시도해주세요."
+            
+            candidate = resp.candidates[0]
+            finish_reason = getattr(candidate, 'finish_reason', None)
+            logger.debug(f"Candidate finish_reason: {finish_reason}")
+
+            # finish_reason이 오류를 나타내는 경우 처리
+            if finish_reason in (1, 2, 3, 4):  # SAFETY, OTHER, RECITATION, MEDIA_BULK_UPLOAD
+                logger.warning(f"Gemini generation blocked: finish_reason={finish_reason}")
+                return "응답이 안전 정책 또는 기타 이유로 차단되었습니다. 다른 질문을 시도해주세요."
+
+        # resp.text 접근 시도 (안전하게)
+        try:
+            if hasattr(resp, "text") and resp.text:
+                return resp.text
+        except Exception as e:
+            logger.warning(f"resp.text access failed: {e}")
+            # text 접근 실패 시 candidates에서 추출 시도
+
+        # 일부 SDK 버전 호환
+        if hasattr(resp, "candidates") and resp.candidates:
+            parts = resp.candidates[0].content.parts
+            texts = []
+            for p in parts:
+                t = getattr(p, "text", None)
+                if t:
+                    texts.append(t)
+            return "\n".join(texts).strip()
+
+    except Exception as e:
+        logger.exception("extract_gemini_text error: %s", e)
+    return ""
+
+def safe_generate(prompt: str, retries: int = 2, parts=None, stream: bool = False) -> str:
+    """finish_reason 이슈/빈응답 시 재시도 (스트리밍 지원 버전)."""
+    max_retries = retries
+
+    for attempt in range(max_retries + 1):
+        try:
+            logger.debug(f"Safe_generate attempt {attempt + 1}/{max_retries + 1}")
+
+            # Generate content
+            if parts:
+                r = model.generate_content(prompt, parts=parts, stream=stream)
+            else:
+                r = model.generate_content(prompt, stream=stream)
+
+            # Extract text
+            if stream:
+                # Streaming mode - concatenate all chunks
+                full_response = []
+                for chunk in r:
+                    out = extract_gemini_text(chunk)
+                    if out.strip():
+                        full_response.append(out)
+                final_out = "\n".join(full_response)
+            else:
+                # Normal mode - extract once
+                final_out = extract_gemini_text(r)
+
+            # Check if response is valid
+            if final_out.strip():
+                logger.debug(f"Successfully generated text (attempt {attempt + 1})")
+                return final_out.strip()
+
+            # Empty response, retry
+            logger.warning(f"Empty response on attempt {attempt + 1}")
+
+        except Exception as e:
+            logger.warning(f"safe_generate attempt {attempt + 1} failed: {e}")
+
+        # If not the last attempt, wait briefly before retrying
+        if attempt < max_retries:
+            time.sleep(0.5)  # Short delay before retry
+
+    # All attempts failed
+    logger.error(f"All {max_retries + 1} attempts failed")
+    return "응답을 생성할 수 없습니다. 잠시 후 다시 시도하거나 질문을 다르게 해보세요."
+
+def split_into_chunks(text: str, max_chars: int = 1500):
+    text = text.replace("\r\n", "\n")
+    blocks = re.split(r"\n{2,}", text)  # 문단 단위
+    chunks, buf = [], ""
+    for b in blocks:
+        if len(buf) + len(b) + 2 <= max_chars:
+            buf = f"{buf}\n\n{b}" if buf else b
+        else:
+            if buf:
+                chunks.append(buf)
+            buf = b
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+def local_summary(text: str, max_length: int = 100) -> str:
+    """로컬 요약 (단순한 경우 AI 호출 생략)"""
+    # Very short text - direct return
+    if len(text) <= 50:
+        return text.strip()
+
+    # Simple truncation for short texts
+    if len(text) <= max_length:
+        # Get first sentence + last sentence
+        sentences = re.split(r'[.!?]+', text)
+        if len(sentences) >= 2:
+            return f"{sentences[0].strip()}. ... {sentences[-1].strip()}."
+        return text[:max_length] + "..."
+
+    return None  # Needs AI
+
+def summarize_chunk(chunk: str, chunk_num: int) -> tuple[int, str]:
+    """병렬 처리를 위한 chunk 요약 함수 (로컬 요약 지원)"""
+    # Check if we can use local summary
+    local = local_summary(chunk)
+    if local:
+        return (chunk_num, local)
+
+    # AI summary needed
+    prompt = f"""다음 텍스트를 한국어로 5줄 이내 핵심 요약해줘.
+
+[텍스트]
+{chunk}
+"""
+    result = safe_generate(prompt)
+    return (chunk_num, result)
+
+def map_reduce_summarize(text: str) -> str:
+    """병렬 Map-Reduce 요약 (속도 최적화)"""
+    # Short text - direct summary (fast!)
+    if len(text) <= 1500:
+        prompt = f"""다음 텍스트를 한국어로 10줄 이내 핵심 요약해주세요.
+
+[텍스트]
+{text}
+"""
+        return safe_generate(prompt)
+
+    # Long text - parallel processing
+    chunks = split_into_chunks(text)
+    partials = {}
+
+    # Parallel chunk summarization
+    with ThreadPoolExecutor(max_workers=min(len(chunks), 5)) as executor:
+        # Submit all chunk summarization tasks
+        future_to_chunk = {
+            executor.submit(summarize_chunk, c, i): i
+            for i, c in enumerate(chunks, 1)
+        }
+
+        # Collect results as they complete
+        for future in as_completed(future_to_chunk):
+            chunk_num, result = future.result()
+            partials[chunk_num] = f"[{chunk_num}] {result}"
+
+    # Merge partial summaries
+    sorted_partials = [partials[i] for i in sorted(partials.keys())]
+    merged = "\n".join(sorted_partials)
+    merged = "\n".join(partials)
+
+    final_prompt = f"""아래 부분 요약들을 통합하여 중복 제거, 항목화, 액션아이템/결론을 분리한
+최종 요약을 만들어주세요. 한국어, 10줄 이내.
+
+[부분 요약들]
+{merged}
+"""
+    return safe_generate(final_prompt)
+
+# =============================================================================
+# INTENT CLASSIFICATION AND ROUTING
+# =============================================================================
+
+SMALL_TALK_PAT = re.compile(r"(안녕|헬로우|하이|ㅎㅇ|고마워|ㅋㅋ|ㅎㅎ|뭐해|잘 지냈|헬로|hello|hi)", re.I)
+DATE_PAT = re.compile(r"(오늘.*(며칠|날짜)|오늘 날짜)", re.I)
+TIME_PAT = re.compile(r"(지금.*(몇\s*시)|몇시|현재\s*시각|time)", re.I)
+QMARK_PAT = re.compile(r"\?")
+
+def classify_intent(t: str) -> str:
+    """greet/date/time/analyze/qa/other 중 하나."""
+    s = t.strip()
+    if not s:
+        return "other"
+    if SMALL_TALK_PAT.search(s):
+        return "greet"
+    if DATE_PAT.search(s):
+        return "date"
+    if TIME_PAT.search(s):
+        return "time"
+
+    # 길고 구조적이면 분석
+    lines = s.count("\n")
+    has_md = bool(re.search(r"(^#\s|\n-\s|\n\d+\.\s|```)", s, re.M))
+    if len(s) > 400 or lines >= 3 or has_md or "요약" in s or "분석" in s or "정리" in s or "핵심" in s:
+        return "analyze"
+
+    # 물음표/의문사 → Q/A
+    if QMARK_PAT.search(s) or re.search(r"(뭐|왜|어떻게|어딘|누가|무엇|어디|언제)", s):
+        return "qa"
+
+    # 모호 → 소형 대화
+    if len(s) <= 20:
+        return "greet"
+    return "other"
+
+def render_date_time(intent: str, tz: str = "Asia/Seoul") -> str:
+    now = datetime.now(ZoneInfo(tz))
+    if intent == "date":
+        # 2025-11-03(월)
+        wd = "월화수목금토일"[now.weekday()]
+        return f"{now:%Y-%m-%d}({wd})"
+    if intent == "time":
+        return f"{now:%H:%M:%S}"
+    return f"{now:%Y-%m-%d %H:%M:%S}"
+
+def respond_small_talk(text: str, history_tail: list[str]) -> str:
+    history = "\n".join(history_tail[-5:]) if history_tail else ""
+    prompt = f"""너는 친근한 한국어 대화 에이전트야.
+아래 사용자의 인삿말/짧은 대화에 1~2문장으로 자연스럽게 응답해줘.
+과장/유머는 가볍게. 이모지는 1개 이하.
+
+[최근 대화 히스토리]
+{history}
+
+[사용자 입력]
+{text}
+"""
+    return safe_generate(prompt)
+
+def answer_qa(text: str) -> str:
+    prompt = f"""다음 질문/요청에 간단하고 실용적으로 답해주세요.
+가능하면 5줄 이내 핵심만, 단계/예제/경고가 있으면 덧붙여.
+
+[질문]
+{text}
+"""
+    return safe_generate(prompt)
+
+# =============================================================================
+# FILE PROCESSING UTILITIES
+# =============================================================================
+
+def convert_voice_to_wav(input_path: str, output_path: str) -> bool:
+    """Convert voice file (ogg/mp3) to wav format"""
+    try:
+        cmd = ['ffmpeg', '-i', input_path, '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', output_path, '-y']
+        subprocess.run(cmd, check=True, capture_output=True)
+        return True
+    except Exception as e:
+        logger.error(f"Error converting voice: {e}")
+        return False
+
+
+def transcribe_audio(wav_path: str) -> str:
+    """Transcribe audio to text using Gemini"""
+    if not model:
+        return "Gemini client not initialized."
+
+    try:
+        with open(wav_path, 'rb') as audio_file:
+            audio_data = audio_file.read()
+
+        response = safe_generate(
+            "Transcribe this audio to text. Provide only the text without explanations.",
+            parts=[{"mime_type": "audio/wav", "data": audio_data}]
+        )
+        return response.strip() if response else "음성 전사에 실패했습니다."
+    except Exception as e:
+        logger.error(f"Error transcribing: {e}")
+        return "음성 전사에 실패했습니다."
+
+
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract text from PDF"""
+    try:
+        import PyPDF2
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            text = "".join([page.extract_text() + "\n" for page in reader.pages])
+        return text
+    except Exception as e:
+        logger.error(f"Error extracting PDF: {e}")
+        return "PDF 텍스트 추출 실패"
+
+
+def extract_text_from_docx(docx_path: str) -> str:
+    """Extract text from DOCX"""
+    try:
+        from docx import Document
+        doc = Document(docx_path)
+        return "\n".join([p.text for p in doc.paragraphs])
+    except Exception as e:
+        logger.error(f"Error extracting DOCX: {e}")
+        return "DOCX 텍스트 추출 실패"
+
+
+def extract_text_from_txt(txt_path: str) -> str:
+    """Extract text from TXT"""
+    try:
+        with open(txt_path, 'r', encoding='utf-8') as file:
+            return file.read()
+    except Exception as e:
+        logger.error(f"Error reading TXT: {e}")
+        return "TXT 파일 읽기 실패"
+
+# =============================================================================
+# TELEGRAM BOT HANDLERS
+# =============================================================================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command"""
+    mode = context.user_data.get("mode", "auto")
+    welcome_message = f"""
+🤖 **AI 자동화 허브** 시작합니다! 🚀
+
+현재 모드: [{mode}]
+
+✅ **활성화된 기능:**
+• 📱 Telegram 메시지 분석 (개선된 의도 분류)
+• 🎤 음성 메시지 → 텍스트 변환
+• 🖼️ 이미지 분석 (Gemini Vision)
+• 📄 문서 분석 (PDF/DOCX/TXT)
+• 📁 Google Drive 자동 감시
+• 📧 Gmail 새 메일 분석
+• 📅 Calendar 리마인더
+• 💬 Slack 연동
+• 📝 Notion 자동 기록
+• 🔗 n8n 워크플로우 연동
+
+💡 `/mode chat | analyze | auto` 로 모드 전환 가능!
+
+파일이나 Google Drive에 업로드해보세요!
+AI가 자동으로 분석해서 결과를 알려드립니다.
+"""
+    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+    logger.info(f"New user started bot: {update.effective_user.id}")
+
+
+async def set_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /mode command to toggle response mode"""
+    user_id = update.effective_user.id
+
+    if not context.args:
+        # Show current mode
+        current_mode = context.user_data.get('mode', 'auto')
+        mode_descriptions = {
+            'auto': '자동 (의도에 따라 응답)',
+            'chat': '대화 모드 (모든 입력을 자연스러운 대화로 처리)',
+            'analyze': '분석 모드 (모든 입력을 요약/분석)'
+        }
+        description = mode_descriptions.get(current_mode, current_mode)
+        await update.message.reply_text(f"현재 모드: {description}\n\n사용법: /mode auto|chat|analyze")
+        return
+
+    new_mode = context.args[0].lower()
+    if new_mode in ['auto', 'chat', 'analyze']:
+        context.user_data['mode'] = new_mode
+        mode_descriptions = {
+            'auto': '자동 (의도에 따라 응답)',
+            'chat': '대화 모드 (모든 입력을 자연스러운 대화로 처리)',
+            'analyze': '분석 모드 (모든 입력을 요약/분석)'
+        }
+        description = mode_descriptions.get(new_mode, new_mode)
+        await update.message.reply_text(f"✅ 모드가 {description}로 변경되었습니다.")
+        logger.info(f"User {user_id} changed mode to {new_mode}")
+    else:
+        await update.message.reply_text("❌ 잘못된 모드입니다. 사용법: /mode auto|chat|analyze")
+
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text messages with improved intent classification"""
+    user_text = update.message.text or ""
+    user_id = update.effective_user.id
+    mode = context.user_data.get("mode", "auto")
+
+    logger.info(f"Received text from user {user_id}: {user_text[:50]}...")
+
+    if not model:
+        await update.message.reply_text("❌ Gemini AI가 초기화되지 않았습니다.")
+        return
+
+    try:
+        # 간단한 히스토리(최근 5개만 저장)
+        history = context.user_data.get("history", [])
+        history.append(user_text)
+        context.user_data["history"] = history[-5:]
+
+        # 의도 분류 (auto 모드에서만)
+        if mode == "auto":
+            intent = classify_intent(user_text)
+        elif mode == "chat":
+            intent = "greet"
+        elif mode == "analyze":
+            intent = "analyze"
+        else:
+            intent = "other"
+
+        logger.info(f"Intent: {intent}, Mode: {mode}")
+
+        # 라우팅
+        if intent == "greet":
+            out = respond_small_talk(user_text, history)
+        elif intent == "date":
+            out = render_date_time("date", "Asia/Seoul")
+        elif intent == "time":
+            out = render_date_time("time", "Asia/Seoul")
+        elif intent == "analyze":
+            out = map_reduce_summarize(user_text)
+        elif intent == "qa":
+            out = answer_qa(user_text)
+        else:
+            # 기본 폴백: 짧은 친근 답변
+            out = respond_small_talk(user_text, history)
+
+        # 안전 폴백
+        if not out.strip():
+            out = "응답이 비어 있네요. 조금 더 구체적으로 말씀해주실래요?"
+
+        await update.message.reply_text(out)
+
+        # 분석 결과는 n8n으로 전송
+        if intent == "analyze" and N8N_WEBHOOK_URL:
+            try:
+                from modules.n8n_connector import trigger_custom_workflow
+                trigger_custom_workflow("telegram_text_analysis", {
+                    "user_id": user_id,
+                    "text": user_text,
+                    "intent": intent,
+                    "mode": mode,
+                    "result": out
+                })
+            except Exception as e:
+                logger.error(f"n8n workflow trigger failed: {e}")
+
+        logger.info(f"Sent {intent} response to user {user_id}")
+
+    except Exception as e:
+        logger.error(f"Error processing text: {e}")
+        error_msg = f"❌ 오류 발생: {str(e)[:200]}"
+        await update.message.reply_text(error_msg)
+
+
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle voice messages"""
+    user_id = update.effective_user.id
+    voice = update.message.voice
+
+    logger.info(f"Received voice from user {user_id}")
+
+    try:
+        # Download and convert
+        file = await context.bot.get_file(voice.file_id)
+        with tempfile.NamedTemporaryFile(suffix='.ogg', delete=False) as ogg_file:
+            await file.download_to_drive(ogg_file.name)
+            ogg_path = ogg_file.name
+
+        wav_path = ogg_path.replace('.ogg', '.wav')
+        if not convert_voice_to_wav(ogg_path, wav_path):
+            await update.message.reply_text("❌ 음성 변환 실패")
+            return
+
+        # Transcribe
+        transcription = transcribe_audio(wav_path)
+        if transcription == "음성 전사에 실패했습니다.":
+            await update.message.reply_text(transcription)
+            os.unlink(ogg_path)
+            os.unlink(wav_path)
+            return
+
+        # Analyze with Gemini
+        summary = safe_generate(f"음성 내용을 분석하고 요약해주세요:\n\n{transcription}")
+
+        message = f"🎤 **음성 분석 결과:**\n\n**📄 전사:**\n{transcription}\n\n**📝 요약:**\n{summary}"
+        await update.message.reply_text(message, parse_mode='Markdown')
+
+        # Save to Notion
+        if NOTION_TOKEN:
+            try:
+                from modules.notion_updater import save_transcript_to_notion
+                save_transcript_to_notion("Telegram Voice", f"User {user_id}", transcription, summary)
+            except Exception as e:
+                logger.error(f"Notion save error: {e}")
+
+        # Send to n8n
+        if N8N_WEBHOOK_URL:
+            from modules.n8n_connector import send_transcript_to_n8n
+            send_transcript_to_n8n("Telegram Voice", transcription, summary)
+
+        os.unlink(ogg_path)
+        os.unlink(wav_path)
+        logger.info(f"Sent voice analysis to user {user_id}")
+
+    except Exception as e:
+        logger.error(f"Error processing voice: {e}")
+        await update.message.reply_text("❌ 음성 처리 중 오류 발생")
+
+
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle images"""
+    user_id = update.effective_user.id
+    photo = update.message.photo[-1]
+
+    logger.info(f"Received image from user {user_id}")
+
+    if not model:
+        await update.message.reply_text("❌ Gemini AI가 초기화되지 않았습니다.")
+        return
+
+    try:
+        file = await context.bot.get_file(photo.file_id)
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as img_file:
+            await file.download_to_drive(img_file.name)
+            img_path = img_file.name
+
+        with open(img_path, 'rb') as image_file:
+            image_data = image_file.read()
+
+        analysis = safe_generate(
+            "이미지를 상세히 분석해주세요.",
+            parts=[{"mime_type": "image/jpeg", "data": image_data}]
+        )
+
+        message = f"🖼️ **이미지 분석 결과:**\n\n{analysis}"
+        await update.message.reply_text(message, parse_mode='Markdown')
+
+        # Save to Notion
+        if NOTION_TOKEN:
+            try:
+                from modules.notion_updater import save_file_to_notion
+                save_file_to_notion(f"Image_{user_id}.jpg", analysis, "Image")
+            except Exception as e:
+                logger.error(f"Notion save error: {e}")
+
+        os.unlink(img_path)
+        logger.info(f"Sent image analysis to user {user_id}")
+
+    except Exception as e:
+        logger.error(f"Error processing image: {e}")
+        await update.message.reply_text("❌ 이미지 분석 중 오류 발생")
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle documents with improved processing"""
+    user_id = update.effective_user.id
+    document = update.message.document
+
+    logger.info(f"Received document from user {user_id}: {document.file_name}")
+
+    try:
+        file = await context.bot.get_file(document.file_id)
+        file_ext = os.path.splitext(document.file_name)[1].lower()
+        temp_file = tempfile.NamedTemporaryFile(suffix=file_ext, delete=False)
+        await file.download_to_drive(temp_file.name)
+        temp_file.close()  # Close file handle explicitly
+        doc_path = temp_file.name
+
+        # Extract text
+        if file_ext == '.pdf':
+            text_content = extract_text_from_pdf(doc_path)
+        elif file_ext == '.docx':
+            text_content = extract_text_from_docx(doc_path)
+        elif file_ext in ['.txt', '.md', '.markdown']:
+            text_content = extract_text_from_txt(doc_path)
+        elif file_ext == '.json':
+            text_content = extract_text_from_txt(doc_path)
+        else:
+            await update.message.reply_text("❌ 지원하지 않는 형식입니다. (.pdf, .docx, .txt, .md, .json만 지원)")
+            if os.path.exists(doc_path):
+                os.unlink(doc_path)
+            return
+
+        # Use map_reduce_summarize for all document processing
+        if text_content and "실패" not in text_content:
+            await update.message.reply_text("📄 문서가 길어 Map-Reduce 요약을 수행합니다…")
+            summary = map_reduce_summarize(text_content)
+        else:
+            summary = text_content or "텍스트 추출 실패"
+
+        message = f"📄 **문서 분석 결과:**\n\n**📝 요약:**\n{summary}"
+        await update.message.reply_text(message, parse_mode='Markdown')
+
+        # Save to Notion
+        if NOTION_TOKEN:
+            try:
+                from modules.notion_updater import save_file_to_notion
+                save_file_to_notion(document.file_name, summary, "Document")
+            except Exception as e:
+                logger.error(f"Notion save error: {e}")
+
+        # Send to n8n
+        if N8N_WEBHOOK_URL:
+            from modules.n8n_connector import send_file_to_n8n
+            send_file_to_n8n(document.file_name, summary)
+
+        if os.path.exists(doc_path):
+            os.unlink(doc_path)
+        logger.info(f"Sent document analysis to user {user_id}")
+
+    except Exception as e:
+        logger.error(f"Error processing document: {e}")
+        await update.message.reply_text("❌ 문서 처리 중 오류 발생")
+
+
+# =============================================================================
+# GOOGLE DRIVE WATCHER
+# =============================================================================
+
+def load_processed_files():
+    """Load processed files list"""
+    try:
+        if os.path.exists(PROCESSED_FILES_DB):
+            with open(PROCESSED_FILES_DB, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return []
+    except Exception as e:
+        logger.error(f"Error loading processed files: {e}")
+        return []
+
+
+def save_processed_files(processed_list):
+    """Save processed files list"""
+    try:
+        with open(PROCESSED_FILES_DB, 'w', encoding='utf-8') as f:
+            json.dump(processed_list, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving processed files: {e}")
+
+
+def initialize_drive_service():
+    """Initialize Google Drive API service"""
+    try:
+        credentials = Credentials.from_service_account_file(
+            GOOGLE_SERVICE_JSON_PATH,
+            scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        service = build('drive', 'v3', credentials=credentials)
+        logger.info("✅ Google Drive service initialized")
+        return service
+    except Exception as e:
+        logger.error(f"❌ Drive service error: {e}")
+        return None
+
+
+def get_new_files_from_drive(service, processed_files):
+    """Get new files from Drive"""
+    try:
+        results = service.files().list(
+            q=f"'{DRIVE_FOLDER_ID}' in parents and trashed=false",
+            pageSize=100,
+            fields="nextPageToken, files(id, name, mimeType)"
+        ).execute()
+        items = results.get('files', [])
+        return [item for item in items if item['id'] not in processed_files]
+    except Exception as e:
+        logger.error(f"Error getting Drive files: {e}")
+        return []
+
+
+def download_file_from_drive(service, file_id, file_name):
+    """Download file from Drive"""
+    try:
+        request = service.files().get_media(fileId=file_id)
+        file_path = os.path.join(tempfile.gettempdir(), file_name)
+
+        with open(file_path, 'wb') as fh:
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+
+        return file_path
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        return None
+
+
+def analyze_drive_file(file_path, mime_type):
+    """Analyze file from Drive with improved long text handling"""
+    try:
+        file_ext = os.path.splitext(file_path)[1].lower()
+
+        if mime_type == 'application/pdf' or file_ext == '.pdf':
+            text = extract_text_from_pdf(file_path)
+        elif mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' or file_ext == '.docx':
+            text = extract_text_from_docx(file_path)
+        elif mime_type == 'text/plain' or file_ext == '.txt':
+            text = extract_text_from_txt(file_path)
+        elif mime_type == 'text/markdown' or file_ext == '.md':
+            text = extract_text_from_txt(file_path)
+        elif mime_type.startswith('image/'):
+            with open(file_path, 'rb') as f:
+                data = f.read()
+            return safe_generate(
+                "이미지를 상세히 분석해주세요.",
+                parts=[{"mime_type": mime_type, "data": data}]
+            )
+        elif mime_type.startswith('audio/'):
+            wav_path = file_path.replace(file_ext, '.wav')
+            if convert_voice_to_wav(file_path, wav_path):
+                transcription = transcribe_audio(wav_path)
+                os.unlink(wav_path)
+                if model:
+                    summary = safe_generate(f"음성 내용을 분석해주세요:\n\n{transcription}")
+                    return f"**전사:**\n{transcription}\n\n**분석:**\n{summary}"
+                return transcription
+            return "음성 변환 실패"
+        else:
+            return "지원하지 않는 형식입니다."
+
+        if model and text and "실패" not in text:
+            return map_reduce_summarize(text)
+        return text
+
+    except Exception as e:
+        logger.error(f"Analysis error: {e}")
+        return "파일 분석 오류"
+
+
+async def send_telegram_message(bot, text):
+    """Send message to Telegram"""
+    try:
+        if OWNER_ID:
+            await bot.send_message(chat_id=OWNER_ID, text=text, parse_mode='Markdown')
+            logger.info(f"📱 Telegram message sent")
+    except Exception as e:
+        logger.error(f"Telegram send error: {e}")
+
+
+def drive_watcher_thread(application):
+    """Monitor Google Drive folder"""
+    logger.info("🔍 Google Drive watcher started")
+
+    service = initialize_drive_service()
+    if not service:
+        logger.error("❌ Drive service failed. Exiting.")
+        return
+
+    processed_files = load_processed_files()
+
+    while True:
+        try:
+            new_files = get_new_files_from_drive(service, processed_files)
+
+            if new_files:
+                logger.info(f"[Drive] Found {len(new_files)} new file(s)")
+
+                for file_info in new_files:
+                    file_id = file_info['id']
+                    file_name = file_info['name']
+                    mime_type = file_info['mimeType']
+
+                    logger.info(f"[Drive] New file: {file_name}")
+
+                    file_path = download_file_from_drive(service, file_id, file_name)
+                    if not file_path:
+                        continue
+
+                    analysis = analyze_drive_file(file_path, mime_type)
+                    message = f"📂 [{file_name}]\n\n📝 **Gemini 분석 결과:**\n{analysis}"
+
+                    # Send to Telegram using asyncio.create_task
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(send_telegram_message(application.bot, message))
+                    finally:
+                        loop.close()
+
+                    # Save to Notion
+                    if NOTION_TOKEN:
+                        try:
+                            from modules.notion_updater import save_file_to_notion
+                            save_file_to_notion(file_name, analysis, "Drive File")
+                        except Exception as e:
+                            logger.error(f"Notion error: {e}")
+
+                    # Send to n8n
+                    if N8N_WEBHOOK_URL:
+                        from modules.n8n_connector import send_file_to_n8n
+                        send_file_to_n8n(file_name, analysis)
+
+                    os.unlink(file_path)
+                    processed_files.append(file_id)
+                    save_processed_files(processed_files)
+                    logger.info(f"[Drive] Completed: {file_name}")
+
+            time.sleep(60)
+
+        except Exception as e:
+            logger.error(f"Drive watcher error: {e}")
+            time.sleep(60)
+
+
+# =============================================================================
+# ERROR HANDLER
+# =============================================================================
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors"""
+    logger.warning(f'Error: {context.error}')
+    if update and update.effective_message:
+        update.effective_message.reply_text("❌ 알 수 없는 오류가 발생했습니다.")
+
+
+# =============================================================================
+# MAIN FUNCTION
+# =============================================================================
+
+def build_app() -> Application:
+    """Build the Telegram application with enhanced handlers"""
+    app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
+    # Core handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("mode", set_mode))
+    
+    # Message handlers
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    
+    # Error handler
+    app.add_error_handler(error_handler)
+    
+    return app
+
+
+def main():
+    """
+    Start all automation modules with enhanced configuration
+    """
+    logger.info("=" * 60)
+    logger.info("🤖 AI 자동화 허브 시작 (개선된 버전)")
+    logger.info("=" * 60)
+
+    # Create Telegram application
+    application = build_app()
+
+    # Start Google Drive watcher
+    if DRIVE_FOLDER_ID:
+        drive_thread = threading.Thread(target=drive_watcher_thread, args=(application,), daemon=True)
+        drive_thread.start()
+        logger.info("✅ Google Drive watcher started")
+    else:
+        logger.info("⚠️ Drive monitoring disabled")
+
+    # Start Gmail watcher
+    if os.getenv("GMAIL_CLIENT_SECRET_PATH"):
+        try:
+            import asyncio
+            from modules.gmail_watcher import gmail_watcher_thread
+            from modules.gemini_client import get_gemini_client
+
+            gmail_thread = threading.Thread(
+                target=gmail_watcher_thread,
+                args=(get_gemini_client(), application.bot),
+                daemon=True
+            )
+            gmail_thread.start()
+            logger.info("✅ Gmail watcher started")
+        except Exception as e:
+            logger.error(f"❌ Gmail watcher failed: {e}")
+    else:
+        logger.info("⚠️ Gmail monitoring disabled")
+
+    # Start Calendar checker
+    if os.getenv("GMAIL_CLIENT_SECRET_PATH"):
+        try:
+            from modules.calendar_checker import calendar_checker_thread
+            from modules.gemini_client import get_gemini_client
+
+            calendar_thread = threading.Thread(
+                target=calendar_checker_thread,
+                args=(get_gemini_client(), application.bot),
+                daemon=True
+            )
+            calendar_thread.start()
+            logger.info("✅ Calendar checker started")
+        except Exception as e:
+            logger.error(f"❌ Calendar checker failed: {e}")
+    else:
+        logger.info("⚠️ Calendar monitoring disabled")
+
+    # Start Slack watcher
+    if SLACK_BOT_TOKEN:
+        try:
+            from modules.slack_handler import slack_watcher_thread
+            from modules.gemini_client import get_gemini_client
+
+            slack_thread = threading.Thread(
+                target=slack_watcher_thread,
+                args=(get_gemini_client(), application.bot),
+                daemon=True
+            )
+            slack_thread.start()
+            logger.info("✅ Slack watcher started")
+        except Exception as e:
+            logger.error(f"❌ Slack watcher failed: {e}")
+    else:
+        logger.info("⚠️ Slack integration disabled")
+
+    # Start polling
+    logger.info("✅ 모든 모듈 초기화 완료")
+    logger.info("📡 Telegram 봇 폴링 시작...")
+    logger.info("=" * 60)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,4 +1,12 @@
 import os, sys
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from modules.process_lock import file_lock, AlreadyRunning
 from modules.logging_setup import setup_logger
 from modules.env_check import assert_env

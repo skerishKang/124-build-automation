@@ -29,6 +29,15 @@ except ImportError:
     pass
 
 import google.generativeai as genai
+# === [AUTO-INJECT] base utils ===
+from modules.logging_setup import setup_logger
+from modules.env_check import assert_env
+try:
+    from modules.drive_watcher import poll_drive_once
+except Exception:
+    poll_drive_once = None
+# === [/AUTO-INJECT] ===
+
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ApplicationBuilder
 
@@ -966,11 +975,44 @@ def main():
     Start all automation modules with enhanced configuration
     """
     logger.info("=" * 60)
+
+    # === [AUTO-INJECT] boot ===
+    setup_logger("app")
+    assert_env()
+    # === [/AUTO-INJECT] ===
+
     logger.info("🤖 AI 자동화 허브 시작 (개선된 버전)")
     logger.info("=" * 60)
 
     # Create Telegram application
     application = build_app()
+
+    # === [AUTO-INJECT] drive schedule ===
+    import os, threading, time
+
+    def _fetch_list():
+        # TODO: Google Drive API 연동 함수로 교체 (list: [{id,name,mimeType}, ...])
+        return []
+
+    def _handle_file(f):
+        # TODO: 파일 다운로드 → 요약 → 알림/저장 로직
+        pass
+
+    def _drive_loop():
+        while True:
+            try:
+                if poll_drive_once:
+                    poll_drive_once(_fetch_list, _handle_file)
+            except Exception as e:
+                logger.exception(f"[drive] {e}")
+            time.sleep(60)
+
+    if os.getenv("DRIVE_FOLDER_ID") and poll_drive_once and "AUTO_DRIVE_LOOP" not in globals():
+        AUTO_DRIVE_LOOP = True
+        threading.Thread(target=_drive_loop, daemon=True).start()
+        logger.info("Drive watcher thread started.")
+    # === [/AUTO-INJECT] ===
+
 
     # Start Google Drive watcher
     if DRIVE_FOLDER_ID:
