@@ -19,6 +19,17 @@ logger = logging.getLogger(__name__)
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID", "")
 
+def to_slack_ts(value):
+    """
+    Slack latest/oldest는 '정수.소수' 문자열 형태를 선호.
+    숫자면 float 변환 후 문자열로, 문자열 숫자면 그대로 반환.
+    ISO8601 등 다른 형식은 여기서 epoch 변환 로직을 추가하세요.
+    """
+    if isinstance(value, (int, float)):
+        return str(float(value))
+    if isinstance(value, str) and value.replace(".","",1).isdigit():
+        return value
+    return None
 
 class SlackHandler:
     def __init__(self):

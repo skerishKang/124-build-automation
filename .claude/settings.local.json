@@ -1,0 +1,12 @@
+{
+  "enabledMcpjsonServers": [
+    "30-my-automate-supabase",
+    "filesystem",
+    "perplexity",
+    "desktop-commander",
+    "arxiv",
+    "academic-search",
+    "fetch",
+    "github"
+  ]
+}
