@@ -114,7 +114,7 @@ try:
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
     ]
     model = genai.GenerativeModel(
-        'gemini-2.5-flash',
+        'gemini-2.5-pro',
         generation_config=generation_config,
         safety_settings=safety_settings
     )
@@ -127,274 +127,7 @@ except Exception as e:
 # ENHANCED UTILITIES
 # =============================================================================
 
-def extract_gemini_text(resp) -> str:
-    """Gemini 응답에서 text만 안전 추출."""
-    try:
-        if not resp:
-            return ""
 
-        # finish_reason 확인 (0=OK, 1=SAFETY, 2=OTHER)
-        if hasattr(resp, 'prompt_feedback'):
-            prompt_feedback = resp.prompt_feedback
-            if hasattr(prompt_feedback, 'block_reason'):
-                block_reason = prompt_feedback.block_reason
-                logger.warning(f"Gemini response blocked: {block_reason}")
-                return "콘텐츠가 안전 정책에 의해 차단되었습니다. 다른 질문을 시도해주세요."
-
-        # finish_reason이 2(Safety) 또는 다른 오류 상태인지 체크
-        if hasattr(resp, 'candidates'):
-            if not resp.candidates:
-                logger.warning("No candidates in Gemini response")
-                return "응답을 생성할 수 없습니다. 다른 질문을 시도해주세요."
-            
-            candidate = resp.candidates[0]
-            finish_reason = getattr(candidate, 'finish_reason', None)
-            logger.debug(f"Candidate finish_reason: {finish_reason}")
-
-            # finish_reason이 오류를 나타내는 경우 처리
-            if finish_reason in (1, 2, 3, 4):  # SAFETY, OTHER, RECITATION, MEDIA_BULK_UPLOAD
-                logger.warning(f"Gemini generation blocked: finish_reason={finish_reason}")
-                return "응답이 안전 정책 또는 기타 이유로 차단되었습니다. 다른 질문을 시도해주세요."
-
-        # resp.text 접근 시도 (안전하게)
-        try:
-            if hasattr(resp, "text") and resp.text:
-                return resp.text
-        except Exception as e:
-            logger.warning(f"resp.text access failed: {e}")
-            # text 접근 실패 시 candidates에서 추출 시도
-
-        # 일부 SDK 버전 호환
-        if hasattr(resp, "candidates") and resp.candidates:
-            parts = resp.candidates[0].content.parts
-            texts = []
-            for p in parts:
-                t = getattr(p, "text", None)
-                if t:
-                    texts.append(t)
-            return "\n".join(texts).strip()
-
-    except Exception as e:
-        logger.exception("extract_gemini_text error: %s", e)
-    return ""
-
-def safe_generate(prompt: str, retries: int = 2, parts=None, stream: bool = False) -> str:
-    """finish_reason 이슈/빈응답 시 재시도 (스트리밍 지원 버전)."""
-    max_retries = retries
-
-    for attempt in range(max_retries + 1):
-        try:
-            logger.debug(f"Safe_generate attempt {attempt + 1}/{max_retries + 1}")
-
-            safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ]
-            # Generate content
-            if parts:
-                r = model.generate_content(
-                    prompt, 
-                    parts=parts, 
-                    stream=stream,
-                    safety_settings=safety_settings
-                )
-            else:
-                r = model.generate_content(
-                    prompt, 
-                    stream=stream,
-                    safety_settings=safety_settings
-                )
-
-            # Extract text
-            if stream:
-                # Streaming mode - concatenate all chunks
-                full_response = []
-                for chunk in r:
-                    out = extract_gemini_text(chunk)
-                    if out.strip():
-                        full_response.append(out)
-                final_out = "\n".join(full_response)
-            else:
-                # Normal mode - extract once
-                final_out = extract_gemini_text(r)
-
-            # Check if response is valid
-            if final_out.strip():
-                logger.debug(f"Successfully generated text (attempt {attempt + 1})")
-                return final_out.strip()
-
-            # Empty response, retry
-            logger.warning(f"Empty response on attempt {attempt + 1}")
-
-        except Exception as e:
-            logger.warning(f"safe_generate attempt {attempt + 1} failed: {e}")
-
-        # If not the last attempt, wait briefly before retrying
-        if attempt < max_retries:
-            time.sleep(0.5)  # Short delay before retry
-
-    # All attempts failed
-    logger.error(f"All {max_retries + 1} attempts failed")
-    return "응답을 생성할 수 없습니다. 잠시 후 다시 시도하거나 질문을 다르게 해보세요."
-
-def split_into_chunks(text: str, max_chars: int = 1500):
-    text = text.replace("\r\n", "\n")
-    blocks = re.split(r"\n{2,}", text)  # 문단 단위
-    chunks, buf = [], ""
-    for b in blocks:
-        if len(buf) + len(b) + 2 <= max_chars:
-            buf = f"{buf}\n\n{b}" if buf else b
-        else:
-            if buf:
-                chunks.append(buf)
-            buf = b
-    if buf:
-        chunks.append(buf)
-    return chunks
-
-def local_summary(text: str, max_length: int = 100) -> str:
-    """로컬 요약 (단순한 경우 AI 호출 생략)"""
-    # Very short text - direct return
-    if len(text) <= 50:
-        return text.strip()
-
-    # Simple truncation for short texts
-    if len(text) <= max_length:
-        # Get first sentence + last sentence
-        sentences = re.split(r'[.!?]+', text)
-        if len(sentences) >= 2:
-            return f"{sentences[0].strip()}. ... {sentences[-1].strip()}."
-        return text[:max_length] + "..."
-
-    return None  # Needs AI
-
-def summarize_chunk(chunk: str, chunk_num: int) -> tuple[int, str]:
-    """병렬 처리를 위한 chunk 요약 함수 (로컬 요약 지원)"""
-    # Check if we can use local summary
-    local = local_summary(chunk)
-    if local:
-        return (chunk_num, local)
-
-    # AI summary needed
-    prompt = f"""다음 텍스트를 한국어로 5줄 이내 핵심 요약해줘.
-
-[텍스트]
-{chunk}
-"""
-    result = safe_generate(prompt)
-    return (chunk_num, result)
-
-def map_reduce_summarize(text: str) -> str:
-    """병렬 Map-Reduce 요약 (속도 최적화)"""
-    # Short text - direct summary (fast!)
-    if len(text) <= 1500:
-        prompt = f"""다음 텍스트를 한국어로 10줄 이내 핵심 요약해주세요.
-
-[텍스트]
-{text}
-"""
-        return safe_generate(prompt)
-
-    # Long text - parallel processing
-    chunks = split_into_chunks(text)
-    partials = {}
-
-    # Parallel chunk summarization
-    with ThreadPoolExecutor(max_workers=min(len(chunks), 5)) as executor:
-        # Submit all chunk summarization tasks
-        future_to_chunk = {
-            executor.submit(summarize_chunk, c, i): i
-            for i, c in enumerate(chunks, 1)
-        }
-
-        # Collect results as they complete
-        for future in as_completed(future_to_chunk):
-            chunk_num, result = future.result()
-            partials[chunk_num] = f"[{chunk_num}] {result}"
-
-    # Merge partial summaries
-    sorted_partials = [partials[i] for i in sorted(partials.keys())]
-    merged = "\n".join(sorted_partials)
-    merged = "\n".join(partials)
-
-    final_prompt = f"""아래 부분 요약들을 통합하여 중복 제거, 항목화, 액션아이템/결론을 분리한
-최종 요약을 만들어주세요. 한국어, 10줄 이내.
-
-[부분 요약들]
-{merged}
-"""
-    return safe_generate(final_prompt)
-
-# =============================================================================
-# INTENT CLASSIFICATION AND ROUTING
-# =============================================================================
-
-SMALL_TALK_PAT = re.compile(r"(안녕|헬로우|하이|ㅎㅇ|고마워|ㅋㅋ|ㅎㅎ|뭐해|잘 지냈|헬로|hello|hi)", re.I)
-DATE_PAT = re.compile(r"(오늘.*(며칠|날짜)|오늘 날짜)", re.I)
-TIME_PAT = re.compile(r"(지금.*(몇\s*시)|몇시|현재\s*시각|time)", re.I)
-QMARK_PAT = re.compile(r"\?")
-
-def classify_intent(t: str) -> str:
-    """greet/date/time/analyze/qa/other 중 하나."""
-    s = t.strip()
-    if not s:
-        return "other"
-    if SMALL_TALK_PAT.search(s):
-        return "greet"
-    if DATE_PAT.search(s):
-        return "date"
-    if TIME_PAT.search(s):
-        return "time"
-
-    # 길고 구조적이면 분석
-    lines = s.count("\n")
-    has_md = bool(re.search(r"(^#\s|\n-\s|\n\d+\.\s|```)", s, re.M))
-    if len(s) > 400 or lines >= 3 or has_md or "요약" in s or "분석" in s or "정리" in s or "핵심" in s:
-        return "analyze"
-
-    # 물음표/의문사 → Q/A
-    if QMARK_PAT.search(s) or re.search(r"(뭐|왜|어떻게|어딘|누가|무엇|어디|언제)", s):
-        return "qa"
-
-    # 모호 → 소형 대화
-    if len(s) <= 20:
-        return "greet"
-    return "other"
-
-def render_date_time(intent: str, tz: str = "Asia/Seoul") -> str:
-    now = datetime.now(ZoneInfo(tz))
-    if intent == "date":
-        # 2025-11-03(월)
-        wd = "월화수목금토일"[now.weekday()]
-        return f"{now:%Y-%m-%d}({wd})"
-    if intent == "time":
-        return f"{now:%H:%M:%S}"
-    return f"{now:%Y-%m-%d %H:%M:%S}"
-
-def respond_small_talk(text: str, history_tail: list[str]) -> str:
-    history = "\n".join(history_tail[-5:]) if history_tail else ""
-    prompt = f"""너는 친근한 한국어 대화 에이전트야.
-아래 사용자의 인삿말/짧은 대화에 1~2문장으로 자연스럽게 응답해줘.
-과장/유머는 가볍게. 이모지는 1개 이하.
-
-[최근 대화 히스토리]
-{history}
-
-[사용자 입력]
-{text}
-"""
-    return safe_generate(prompt)
-
-def answer_qa(text: str) -> str:
-    prompt = f"""다음 질문/요청에 간단하고 실용적으로 답해주세요.
-가능하면 5줄 이내 핵심만, 단계/예제/경고가 있으면 덧붙여.
-
-[질문]
-{text}
-"""
-    return safe_generate(prompt)
 
 # =============================================================================
 # FILE PROCESSING UTILITIES
@@ -462,6 +195,82 @@ def extract_text_from_txt(txt_path: str) -> str:
     except Exception as e:
         logger.error(f"Error reading TXT: {e}")
         return "TXT 파일 읽기 실패"
+
+# === [AUTO-INJECT] convo mode state ===
+from collections import defaultdict
+from modules.intent_router import detect_intent
+
+# 채팅방/사용자별 모드 상태: 'chat' | 'analyze' | 'auto'
+_CONVO_MODE = defaultdict(lambda: "chat")  # 기본은 'chat'
+
+def set_mode(chat_id: int, mode: str):
+    mode = (mode or "chat").lower()
+    if mode not in ("chat", "analyze", "auto"):
+        mode = "chat"
+    _CONVO_MODE[chat_id] = mode
+    return mode
+
+def get_mode(chat_id: int):
+    return _CONVO_MODE[chat_id]
+# === [/AUTO-INJECT] ===
+
+# === [AUTO-INJECT] telegram commands ===
+async def cmd_chat(update, context):
+    m = set_mode(update.effective_chat.id, "chat")
+    await context.bot.send_message(update.effective_chat.id, "모드를 '대화(chat)'로 전환했습니다. 짧은 문장은 요약하지 않습니다.")
+
+async def cmd_analyze(update, context):
+    m = set_mode(update.effective_chat.id, "analyze")
+    await context.bot.send_message(update.effective_chat.id, "모드를 '분석(analyze)'로 전환했습니다. 긴/짧은 문서도 분석합니다.")
+
+async def cmd_auto(update, context):
+    m = set_mode(update.effective_chat.id, "auto")
+    await context.bot.send_message(update.effective_chat.id, "모드를 '자동(auto)'로 전환했습니다. 내용에 따라 대화/분석을 자동 선택합니다.")
+
+def register_mode_commands(app):
+    from telegram.ext import CommandHandler
+    app.add_handler(CommandHandler("chat", cmd_chat))
+    app.add_handler(CommandHandler("analyze", cmd_analyze))
+    app.add_handler(CommandHandler("auto", cmd_auto))
+# === [/AUTO-INJECT] ===
+
+# === [AUTO-INJECT] convo mode state ===
+from collections import defaultdict
+from modules.intent_router import detect_intent
+
+# 채팅방/사용자별 모드 상태: 'chat' | 'analyze' | 'auto'
+_CONVO_MODE = defaultdict(lambda: "chat")  # 기본은 'chat'
+
+def set_mode(chat_id: int, mode: str):
+    mode = (mode or "chat").lower()
+    if mode not in ("chat", "analyze", "auto"):
+        mode = "chat"
+    _CONVO_MODE[chat_id] = mode
+    return mode
+
+def get_mode(chat_id: int):
+    return _CONVO_MODE[chat_id]
+# === [/AUTO-INJECT] ===
+
+# === [AUTO-INJECT] telegram commands ===
+async def cmd_chat(update, context):
+    m = set_mode(update.effective_chat.id, "chat")
+    await context.bot.send_message(update.effective_chat.id, "모드를 '대화(chat)'로 전환했습니다. 짧은 문장은 요약하지 않습니다.")
+
+async def cmd_analyze(update, context):
+    m = set_mode(update.effective_chat.id, "analyze")
+    await context.bot.send_message(update.effective_chat.id, "모드를 '분석(analyze)'로 전환했습니다. 긴/짧은 문서도 분석합니다.")
+
+async def cmd_auto(update, context):
+    m = set_mode(update.effective_chat.id, "auto")
+    await context.bot.send_message(update.effective_chat.id, "모드를 '자동(auto)'로 전환했습니다. 내용에 따라 대화/분석을 자동 선택합니다.")
+
+def register_mode_commands(app):
+    from telegram.ext import CommandHandler
+    app.add_handler(CommandHandler("chat", cmd_chat))
+    app.add_handler(CommandHandler("analyze", cmd_analyze))
+    app.add_handler(CommandHandler("auto", cmd_auto))
+# === [/AUTO-INJECT] ===
 
 # =============================================================================
 # TELEGRAM BOT HANDLERS
@@ -546,76 +355,45 @@ def handle_incoming_text(text: str) -> str:
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text messages with improved intent classification"""
+    """Handle text messages with improved intent classification and error handling."""
     user_text = update.message.text or ""
     user_id = update.effective_user.id
-    mode = context.user_data.get("mode", "auto")
-
     logger.info(f"Received text from user {user_id}: {user_text[:50]}...")
 
-    if not model:
-        await update.message.reply_text("❌ Gemini AI가 초기화되지 않았습니다.")
-        return
-
     try:
-        # 간단한 히스토리(최근 5개만 저장)
-        history = context.user_data.get("history", [])
-        history.append(user_text)
-        context.user_data["history"] = history[-5:]
+        # 1. Use the short-circuit function for small talk
+        quick_response = handle_incoming_text(user_text)
+        if quick_response is not None:
+            await update.message.reply_text(quick_response)
+            return
 
-        # 의도 분류 (auto 모드에서만)
-        if mode == "auto":
-            intent = classify_intent(user_text)
-        elif mode == "chat":
-            intent = "greet"
-        elif mode == "analyze":
-            intent = "analyze"
-        else:
-            intent = "other"
+        # 2. For longer text, use the robust pipeline
+        from modules.gemini_client import generate_text_safe
+        
+        await update.message.reply_text("📝 텍스트를 분석 중입니다. 잠시만 기다려주세요...")
 
-        logger.info(f"Intent: {intent}, Mode: {mode}")
+        prompt = f"다음 텍스트를 분석하고, 내용을 요약한 뒤, 핵심 액션 아이템을 1~3개 제안해주세요.\n\n---\n{user_text}"
+        result = generate_text_safe(prompt)
 
-        # 라우팅
-        if intent == "greet":
-            out = respond_small_talk(user_text, history)
-        elif intent == "date":
-            out = render_date_time("date", "Asia/Seoul")
-        elif intent == "time":
-            out = render_date_time("time", "Asia/Seoul")
-        elif intent == "analyze":
-            out = map_reduce_summarize(user_text)
-        elif intent == "qa":
-            out = answer_qa(user_text)
-        else:
-            # 기본 폴백: 짧은 친근 답변
-            out = respond_small_talk(user_text, history)
+        if result["ok"]:
+            response_text = result["text"]
+        elif result.get("blocked"):
+            # 2nd-pass with a safer prompt
+            safe_prompt = f"규칙: 민감한 표현은 [REDACTED]로 치환하고, 핵심 요지만 중립적으로 요약해주세요.\n\n---\n{user_text}"
+            result2 = generate_text_safe(safe_prompt)
+            if result2["ok"]:
+                response_text = "해당 내용은 일부 민감할 수 있는 표현을 제외하고 중립적으로 요약했습니다.\n\n" + result2["text"]
+            else:
+                response_text = "요청을 처리할 수 없었습니다. 내용에 민감한 부분이 포함되어 있을 수 있습니다. 다른 표현으로 다시 시도해 주세요."
+        else:  # General error
+            response_text = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+            logger.error(f"General error from generate_text_safe: {result.get('reason')}")
 
-        # 안전 폴백
-        if not out.strip():
-            out = "응답이 비어 있네요. 조금 더 구체적으로 말씀해주실래요?"
-
-        await update.message.reply_text(out)
-
-        # 분석 결과는 n8n으로 전송
-        if intent == "analyze" and N8N_WEBHOOK_URL:
-            try:
-                from modules.n8n_connector import trigger_custom_workflow
-                trigger_custom_workflow("telegram_text_analysis", {
-                    "user_id": user_id,
-                    "text": user_text,
-                    "intent": intent,
-                    "mode": mode,
-                    "result": out
-                })
-            except Exception as e:
-                logger.error(f"n8n workflow trigger failed: {e}")
-
-        logger.info(f"Sent {intent} response to user {user_id}")
+        await update.message.reply_text(response_text)
 
     except Exception as e:
-        logger.error(f"Error processing text: {e}")
-        error_msg = f"❌ 오류 발생: {str(e)[:200]}"
-        await update.message.reply_text(error_msg)
+        logger.exception(f"Error in handle_text_message: {e}")
+        await update.message.reply_text("메시지 처리 중 예기치 않은 오류가 발생했습니다.")
 
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1021,6 +799,20 @@ def main():
 
     # Create Telegram application
     application = build_app()
+
+    # === [AUTO-INJECT] register commands ===
+    try:
+        register_mode_commands(application)  # application은 기존 Telegram Application 인스턴스
+    except Exception:
+        pass
+    # === [/AUTO-INJECT] ===
+
+    # === [AUTO-INJECT] register commands ===
+    try:
+        register_mode_commands(application)  # application은 기존 Telegram Application 인스턴스
+    except Exception:
+        pass
+    # === [/AUTO-INJECT] ===
 
     # === [AUTO-INJECT] drive schedule ===
     import os, threading, time

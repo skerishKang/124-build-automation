@@ -36,7 +36,7 @@ class GeminiClient:
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
             self.model = genai.GenerativeModel(
-                'gemini-2.5-flash',
+                'gemini-2.5-pro',
                 safety_settings=self.safety_settings
             )
             logger.info("Gemini client initialized successfully")
@@ -288,13 +288,40 @@ def _is_blocked(resp_or_err: Any) -> Tuple[bool, str]:
 
     return False, ""
 
+# === [AUTO-INJECT] robust model selection ===
+import google.generativeai as genai
+
+_ALIASES = {
+    "2.5-flash-lite": "gemini-2.5-flash-lite",
+    "2.5-flash":      "gemini-2.5-flash-latest",
+    "2.5-pro":        "gemini-2.5-pro-latest",
+}
+
+def _normalize(name: str) -> str:
+    return _ALIASES.get(name.strip(), name.strip())
+
+def _pick_supported(preferred: str, need="generateContent") -> str:
+    want = _normalize(preferred)
+    try:
+        models = list(genai.list_models())
+        # 완전 일치 + 메서드 지원
+        for m in models:
+            if m.name.endswith(want) and need in getattr(m, "supported_generation_methods", []):
+                return m.name.replace("models/","")
+        # 계열 매칭(앞부분 동일) 중 최신
+        base = want.split("-latest")[0]
+        cands = [m for m in models if base in m.name and need in getattr(m,"supported_generation_methods",[])]
+        if cands:
+            return sorted(cands, key=lambda x: x.name, reverse=True)[0].name.replace("models/","")
+    except Exception:
+        pass
+    return want
+
 def generate_text_safe(prompt: str, *, temperature: float = 0.2, max_tokens: int = 2048) -> Dict[str, Any]:
     """
     차단은 'blocked=True'로 명시하고, 일반 에러는 'error'로 구분해서 리턴.
     호출측은 메시지를 분기 처리 가능.
     """
-    import google.generativeai as genai
-
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -302,12 +329,14 @@ def generate_text_safe(prompt: str, *, temperature: float = 0.2, max_tokens: int
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
     ]
 
-    order = ["gemini-1.5-flash", "gemini-1.5-pro"]
+    order = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"]
     last_err = None
     for model_name in order:
         try:
+            real_model_name = _pick_supported(model_name)
+            logger.info(f"[Gemini] using model: {real_model_name} (requested='{model_name}')")
             model = genai.GenerativeModel(
-                model_name,
+                model_name=real_model_name, 
                 safety_settings=safety_settings
             )
             resp = model.generate_content(
@@ -317,7 +346,6 @@ def generate_text_safe(prompt: str, *, temperature: float = 0.2, max_tokens: int
             blocked, reason = _is_blocked(resp)
             if blocked:
                 return {"ok": False, "blocked": True, "reason": reason, "text": ""}
-            # 정상 텍스트 추출
             text = ""
             try:
                 text = getattr(resp, "text", None) or resp.candidates[0].content.parts[0].text
@@ -325,12 +353,11 @@ def generate_text_safe(prompt: str, *, temperature: float = 0.2, max_tokens: int
                 text = str(resp)
             return {"ok": True, "blocked": False, "reason": "", "text": text}
         except Exception as e:
-            # 차단인지 일반 오류인지 구분
             blocked, reason = _is_blocked(e)
             if blocked:
                 return {"ok": False, "blocked": True, "reason": reason or str(e), "text": ""}
             last_err = e
             continue
-    # 모든 모델 실패(일반 에러)
     return {"ok": False, "blocked": False, "reason": str(last_err or "unknown"), "text": ""}
+# === [/AUTO-INJECT] ===
 # === [/AUTO-INJECT] ===
