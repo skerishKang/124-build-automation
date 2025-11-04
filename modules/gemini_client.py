@@ -5,7 +5,7 @@ Supports: Gemini (google-generativeai) and MiniMax (Anthropic-compatible API).
 
 import os
 import base64
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Iterator
 
 import google.generativeai as genai
 import requests
@@ -20,7 +20,7 @@ def _provider() -> str:
     return (os.getenv("LLM_PROVIDER", "gemini") or "gemini").lower()
 
 
-def _gemini_model_name(default: str = "gemini-1.5-flash") -> str:
+def _gemini_model_name(default: str = "gemini-2.5-flash") -> str:
     return os.getenv("GEMINI_MODEL", default)
 
 
@@ -174,3 +174,38 @@ def generate_vision_safe(prompt: str, parts: List[Dict[str, Any]], *, temperatur
         return {"ok": True, "text": text, "error": None}
     except Exception as e:
         return {"ok": False, "text": "", "error": str(e)}
+
+
+def generate_text_stream(prompt: str, temperature: float = 0.7, max_tokens: int = 1024) -> Iterator[str]:
+    """Yield partial text responses. For MiniMax, falls back to single-shot."""
+    try:
+        if _provider() == "minimax":
+            # No streaming implemented for MiniMax here; yield once
+            res = generate_text_safe(prompt, temperature=temperature, max_tokens=max_tokens)
+            if res.get("ok") and res.get("text"):
+                yield res["text"]
+            return
+
+        # Gemini streaming
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(_gemini_model_name())
+        stream = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+            },
+            stream=True,
+        )
+        for chunk in stream:
+            try:
+                txt = getattr(chunk, "text", None)
+                if txt:
+                    yield txt
+            except Exception:
+                continue
+    except Exception:
+        return

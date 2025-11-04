@@ -8,10 +8,16 @@ Telegram + Google Drive + Gmail + Calendar + Notion + Slack + n8n + Gemini AI
 """
 
 import os
-# Load environment variables from .env if available
+# Load environment variables from .env/backend.env if available
 try:
     from dotenv import load_dotenv  # type: ignore
-    load_dotenv()
+    for _p in ("backend.env", ".env", ".env.local"):
+        try:
+            if os.path.exists(_p):
+                # backend.env loads first (lower precedence), others override
+                load_dotenv(dotenv_path=_p, override=(_p != "backend.env"))
+        except Exception:
+            pass
 except Exception:
     pass
 import logging
@@ -137,7 +143,7 @@ if LLM_PROVIDER == "gemini":
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
         ]
         # Allow override and default to a widely available model
-        GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
+        GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
         model = genai.GenerativeModel(
             GEMINI_MODEL,
             generation_config=generation_config,
@@ -407,7 +413,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # === [AUTO-INJECT] message routing ===
-from modules.gemini_client import generate_text_safe
+from modules.gemini_client import generate_text_safe, generate_text_stream
 from modules.telegram_utils import format_ai_text, chunk_text, strip_html_tags, strip_markdown_formatting
 
 async def handle_text(update, context):
@@ -428,18 +434,70 @@ async def handle_text(update, context):
 
     # Build prompt with recent context
     prompt = build_prompt_with_context(ctx_mgr, chat_id, text)
-    res = generate_text_safe(prompt)
 
-    if res.get("ok"):
-        answer = res["text"]
+    # Send a placeholder message and stream updates
+    status = await context.bot.send_message(chat_id, "답변 생성 중… 0%")
+
+    agg = ""
+    last_edit = time.time()
+    max_tokens = int(os.getenv("GEN_MAX_OUTPUT_TOKENS", "1024"))
+    try:
+        for piece in generate_text_stream(prompt, temperature=0.5, max_tokens=max_tokens):
+            if not piece:
+                continue
+            agg += piece
+            now = time.time()
+            # Throttle edits to avoid rate limit
+            if now - last_edit > 0.5:
+                # Approximate progress by output length
+                progress = min(95, max(10, int(len(agg) / max(1, max_tokens) * 100)))
+                snippet = agg[-3500:]
+                try:
+                    await status.edit_text(f"답변 생성 중… {progress}%\n\n{snippet}")
+                except Exception:
+                    pass
+                last_edit = now
+
+        # Finalize
+        final_text = strip_markdown_formatting(agg.strip()) if agg else "요청 처리 중 문제가 발생했습니다. 표현을 조금 바꿔 다시 시도해 주세요."
+        chunks = chunk_text(final_text)
+        if chunks:
+            try:
+                await status.edit_text(f"{chunks[0]}")
+            except Exception:
+                await context.bot.send_message(chat_id, chunks[0])
+            for c in chunks[1:]:
+                await context.bot.send_message(chat_id, c)
+        else:
+            await status.edit_text(final_text)
+
         # Save assistant answer and maybe compress
-        ctx_mgr.add(chat_id, user_id, "assistant", answer, "text")
+        ctx_mgr.add(chat_id, user_id, "assistant", final_text, "text")
         ctx_mgr.compress_if_needed(chat_id)
-        formatted_message, parse_mode = format_ai_text(answer)
-        await context.bot.send_message(chat_id, formatted_message, parse_mode=parse_mode)
-    else:
-        formatted_message, parse_mode = format_ai_text("요청 처리 중 문제가 발생했습니다. 표현을 조금 바꿔 다시 시도해 주세요.")
-        await context.bot.send_message(chat_id, formatted_message, parse_mode=parse_mode)
+
+    except Exception as e:
+        logger.error(f"Text streaming failed: {e}")
+        # Fallback single-shot
+        res = generate_text_safe(prompt)
+        if res.get("ok"):
+            answer = strip_markdown_formatting(res["text"])
+            chunks = chunk_text(answer)
+            if chunks:
+                try:
+                    await status.edit_text(chunks[0])
+                except Exception:
+                    await context.bot.send_message(chat_id, chunks[0])
+                for c in chunks[1:]:
+                    await context.bot.send_message(chat_id, c)
+            else:
+                await status.edit_text(answer)
+            ctx_mgr.add(chat_id, user_id, "assistant", answer, "text")
+            ctx_mgr.compress_if_needed(chat_id)
+        else:
+            try:
+                await status.edit_text("요청 처리 중 문제가 발생했습니다. 표현을 조금 바꿔 다시 시도해 주세요.")
+            except Exception:
+                await context.bot.send_message(chat_id, "요청 처리 중 문제가 발생했습니다. 표현을 조금 바꿔 다시 시도해 주세요.")
 # === [/AUTO-INJECT] ===
 
 
@@ -517,6 +575,61 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ 음성 처리 중 오류 발생")
 
 
+async def handle_audio_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle audio files (mp3/m4a/etc.) similar to voice messages"""
+    user_id = update.effective_user.id
+    audio = update.message.audio
+    logger.info(f"Received audio from user {user_id}")
+    try:
+        try:
+            await update.message.reply_text("오디오 파일을 받았습니다. 전사 중입니다…")
+        except Exception:
+            pass
+
+        file = await context.bot.get_file(audio.file_id)
+        # Keep original extension if possible
+        suffix = os.path.splitext(audio.file_name or "audio.mp3")[1] or ".mp3"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as a_file:
+            await file.download_to_drive(a_file.name)
+            a_path = a_file.name
+
+        wav_path = a_path.rsplit('.', 1)[0] + '.wav'
+        if not convert_voice_to_wav(a_path, wav_path):
+            await update.message.reply_text("❌ 오디오 변환 실패 (ffmpeg 설치 확인)")
+            return
+
+        transcription = transcribe_audio(wav_path)
+        if not transcription:
+            transcription = "음성 전사에 실패했습니다."
+
+        chat_id = update.effective_chat.id
+        ctx_mgr.add(chat_id, user_id, "user", f"[음성 전사]\n{transcription}", "voice")
+
+        prompt = build_prompt_with_context(ctx_mgr, chat_id, f"음성 내용을 분석하고 요약:\n{transcription}")
+        res = generate_text_safe(prompt)
+        summary = res.get("text") if res.get("ok") else "음성 분석 및 요약에 실패했습니다."
+
+        message = (
+            "음성 분석 결과:\n\n"
+            f"전사:\n{transcription}\n\n"
+            f"요약:\n{summary}"
+        )
+        await update.message.reply_text(message)
+
+        ctx_mgr.add(chat_id, user_id, "assistant", summary, "voice")
+        ctx_mgr.compress_if_needed(chat_id)
+
+        if os.path.exists(a_path):
+            os.unlink(a_path)
+        if os.path.exists(wav_path):
+            os.unlink(wav_path)
+        logger.info(f"Sent audio analysis to user {user_id}")
+
+    except Exception as e:
+        logger.error(f"Error processing audio: {e}")
+        await update.message.reply_text("❌ 오디오 처리 중 오류 발생")
+
+
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle images"""
     user_id = update.effective_user.id
@@ -539,13 +652,28 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(img_path, 'rb') as image_file:
             image_data = image_file.read()
 
-        # Increase max tokens and handle finish_reason gracefully inside helper
+        # Primary: provider-aware vision
         res = generate_vision_safe(
             "이미지를 상세히 분석해주세요. 핵심 내용과 세부사항을 모두 포함해 한국어로만 설명하세요. 마크다운 없이 순수 텍스트로 작성하세요.",
             parts=[{"mime_type": "image/jpeg", "data": image_data}],
             max_tokens=int(os.getenv("VISION_MAX_TOKENS", "4096"))
         )
         analysis = res.get("text") if res.get("ok") else (res.get("error") or "이미지 분석에 실패했습니다.")
+
+        # Fallback to Gemini vision if provider failed or claimed no image
+        needs_fallback = (not res.get("ok")) or (isinstance(analysis, str) and ("이미지를 볼 수" in analysis or "image" in analysis.lower() and "cannot" in analysis.lower()))
+        if needs_fallback and GEMINI_API_KEY:
+            try:
+                import google.generativeai as _gen
+                _gen.configure(api_key=GEMINI_API_KEY)
+                g_model = _gen.GenerativeModel(os.getenv('GEMINI_MODEL','gemini-2.5-flash'))
+                g_resp = g_model.generate_content([
+                    "이미지를 상세히 분석해주세요. 핵심 내용과 세부사항을 모두 포함해 한국어로만 설명하세요. 마크다운 없이 순수 텍스트로 작성하세요.",
+                    {"mime_type": "image/jpeg", "data": image_data}
+                ])
+                analysis = getattr(g_resp, 'text', '') or analysis
+            except Exception as _e:
+                logger.warning(f"Gemini vision fallback failed: {_e}")
         analysis = strip_markdown_formatting(analysis)
         # Send chunked if too long
         for chunk in chunk_text(analysis):
@@ -633,7 +761,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(chunk)
         else:
             if text_content and "실패" not in text_content:
-                await update.message.reply_text("📄 문서가 길어 Map-Reduce 요약을 수행합니다…")
+                # Long document: perform Map-Reduce summarization silently
                 summary = map_reduce_summarize(text_content)
             else:
                 summary = text_content or "텍스트 추출 실패"
@@ -891,7 +1019,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def build_app() -> Application:
     """Build the Telegram application with enhanced handlers"""
-    app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).concurrent_updates(True).build()
     
     # Core handlers
     app.add_handler(CommandHandler("start", start))
@@ -900,6 +1028,7 @@ def build_app() -> Application:
     # Message handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    app.add_handler(MessageHandler(filters.AUDIO, handle_audio_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_image))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     

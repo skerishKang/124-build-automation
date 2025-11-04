@@ -27,7 +27,13 @@ def main():
     # Load environment variables from .env file
     try:
         from dotenv import load_dotenv
-        load_dotenv()
+        # Load backend.env first (lower precedence), then .env/.env.local override
+        for _p in ("backend.env", ".env", ".env.local"):
+            try:
+                if os.path.exists(_p):
+                    load_dotenv(dotenv_path=_p, override=(_p != "backend.env"))
+            except Exception:
+                pass
     except ImportError:
         pass
 
@@ -39,7 +45,6 @@ def main():
     lock_name = os.getenv("LOCK_FILE","automation_hub.lock")
     # Ensure log directory exists when using file-based logging
     try:
-        import os
         log_file = os.getenv("LOG_FILE")
         if log_file:
             d = os.path.dirname(log_file)

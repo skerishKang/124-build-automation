@@ -147,7 +147,7 @@ def cached_summary(text_hash):
 
 ### 1. 로컬 테스트
 ```bash
-python performance_test.py
+python scripts/performance_test.py
 ```
 
 ### 2. 실제 bot 테스트
