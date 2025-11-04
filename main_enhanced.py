@@ -64,9 +64,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # =============================================================================
 
 # Core settings
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8288922587:AAHUADrjbeLFSTxS_Hx6jEDEbAW88dOzgNY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAP8A5YjpwqOkHo0YLhXUMdzFubYoWSwMk")
-OWNER_ID = os.getenv("OWNER_ID", "5833561465")
+# WARNING: Never commit hardcoded API keys to version control
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OWNER_ID = os.getenv("OWNER_ID")
 
 # Google Drive settings
 GOOGLE_SERVICE_JSON_PATH = os.getenv("GOOGLE_SERVICE_JSON_PATH", "service_account.json")
@@ -275,6 +276,61 @@ def map_reduce_summarize(text: str, max_chunk_size: int = 8000, max_final_summar
     except Exception as e:
         logger.error(f"Map-reduce 요약 오류: {e}")
         return f"요약 중 오류 발생: {str(e)}"
+
+
+def format_ai_text(text: str) -> tuple[str, Optional[str]]:
+    """
+    Format AI text for Telegram messages with markdown support
+    Returns tuple of (formatted_text, parse_mode)
+    """
+    if not text:
+        return "", None
+
+    # Check if text contains markdown formatting
+    has_markdown = any(char in text for char in ['*', '_', '`', '['])
+
+    if has_markdown:
+        return text, "Markdown"
+    else:
+        return text, None
+
+
+def generate_vision_safe(prompt: str, image_path: str = None, temperature: float = 0.7, max_tokens: int = 1000) -> dict:
+    """
+    Analyze image with Gemini Vision API
+    Returns dict with 'ok', 'text', and 'error' keys
+    """
+    if not model:
+        return {"ok": False, "text": "", "error": "Gemini client not initialized"}
+
+    try:
+        if image_path:
+            # Image analysis
+            import google.generativeai as genai
+            image_part = {
+                "mime_type": "image/jpeg",
+                "data": Path(image_path).read_bytes()
+            }
+            response = model.generate_content([prompt, image_part])
+        else:
+            # Text-only analysis
+            response = model.generate_content(prompt)
+
+        return {"ok": True, "text": response.text, "error": None}
+    except Exception as e:
+        logger.error(f"Vision generation error: {e}")
+        return {"ok": False, "text": "", "error": str(e)}
+
+
+def register_mode_commands(application: Application) -> None:
+    """
+    Register additional command handlers for different modes
+    Currently commands are registered in build_app()
+    """
+    # Commands are already registered in build_app()
+    # This function is kept for future mode-specific command registration
+    pass
+
 
 # Treat common text-like extensions as plain text previewable types
 SUPPORTED_TEXT_EXTS = {

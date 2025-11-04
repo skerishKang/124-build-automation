@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import json
+import asyncio
 from typing import Optional
 
 # Load environment variables from .env file
@@ -44,9 +45,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Environment variables (loaded from .env file or environment)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8288922587:AAHUADrjbeLFSTxS_Hx6jEDEbAW88dOzgNY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAP8A5YjpwqOkHo0YLhXUMdzFubYoWSwMk")
-OWNER_ID = os.getenv("OWNER_ID", "5833561465")
+# WARNING: Never commit hardcoded API keys to version control
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OWNER_ID = os.getenv("OWNER_ID")
 
 # Google Drive settings
 GOOGLE_SERVICE_JSON_PATH = os.getenv("GOOGLE_SERVICE_JSON_PATH", "service_account.json")
