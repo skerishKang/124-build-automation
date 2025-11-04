@@ -25,14 +25,12 @@ from zoneinfo import ZoneInfo
 
 
 import google.generativeai as genai
-# === [AUTO-INJECT] base utils ===
 from modules.logging_setup import setup_logger
 from modules.env_check import assert_env
 try:
     from modules.drive_watcher import poll_drive_once
 except Exception:
     poll_drive_once = None
-# === [/AUTO-INJECT] ===
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ApplicationBuilder
@@ -203,6 +201,81 @@ def extract_text_from_txt(txt_path: str) -> str:
             continue
     return "텍스트 파일 읽기 실패"
 
+
+def map_reduce_summarize(text: str, max_chunk_size: int = 8000, max_final_summary: int = 1000) -> str:
+    """
+    긴 텍스트를 Map-Reduce 방식으로 요약
+    1. 텍스트를 청크로 나누기
+    2. 각 청크 요약 (Map)
+    3. 요약 내용 합쳐서 최종 요약 (Reduce)
+    """
+    if not model:
+        return "Gemini client not initialized."
+
+    try:
+        # 텍스트가 짧으면 일반 요약
+        if len(text) <= max_chunk_size:
+            prompt = f"""다음 텍스트를 간결하게 요약해주세요.
+핵심 내용만 {max_final_summary}자 이내로 정리해주세요.
+
+텍스트:
+{text}
+
+요약:"""
+            res = generate_text_safe(prompt, temperature=0.3, max_tokens=max_final_summary)
+            return res.get("text", "요약 실패") if res.get("ok") else "요약 실패"
+
+        # 긴 텍스트를 청크로 나누기
+        chunks = []
+        current_pos = 0
+        while current_pos < len(text):
+            chunk_end = min(current_pos + max_chunk_size, len(text))
+            
+            # 문장 경계 찾기
+            if chunk_end < len(text):
+                last_period = text.rfind('.', current_pos, chunk_end)
+                if last_period > current_pos + max_chunk_size // 2:
+                    chunk_end = last_period + 1
+            
+            chunk = text[current_pos:chunk_end].strip()
+            if chunk:
+                chunks.append(chunk)
+            current_pos = chunk_end
+
+        # 각 청크별 요약 (Map)
+        chunk_summaries = []
+        for i, chunk in enumerate(chunks):
+            prompt = f"""이 텍스트의 핵심 내용을 간결하게 요약해주세요.
+{i+1}/{len(chunks)}번째 부분입니다.
+
+내용:
+{chunk}
+
+요약:"""
+            res = generate_text_safe(prompt, temperature=0.3, max_tokens=300)
+            if res.get("ok"):
+                chunk_summaries.append(res["text"])
+
+        # 요약 내용 합치기 (Reduce)
+        if chunk_summaries:
+            combined_summaries = "\n\n".join([f"- {s}" for s in chunk_summaries])
+            final_prompt = f"""다음은 긴 텍스트를 부분별로 요약한 내용입니다.
+이를 전체를 아우르는 하나의连贯된 요약으로 정리해주세요.
+{max_final_summary}자 이내로 간결하게 정리해주세요.
+
+부분별 요약:
+{combined_summaries}
+
+최종 요약:"""
+            res = generate_text_safe(final_prompt, temperature=0.3, max_tokens=max_final_summary)
+            return res.get("text", "최종 요약 실패") if res.get("ok") else "최종 요약 실패"
+
+        return "요약할 수 있는 내용이 없습니다."
+
+    except Exception as e:
+        logger.error(f"Map-reduce 요약 오류: {e}")
+        return f"요약 중 오류 발생: {str(e)}"
+
 # Treat common text-like extensions as plain text previewable types
 SUPPORTED_TEXT_EXTS = {
     '.txt', '.md', '.markdown', '.json', '.jsonl', '.yaml', '.yml', '.csv', '.log', '.ini', '.cfg', '.conf',
@@ -259,21 +332,20 @@ async def handle_text(update, context):
     text = (update.message.text or "").strip()
 
     if not text:
-        await context.bot.send_message(chat_id, "내용이 비어 있어요. 텍스트를 보내주세요.")
+        formatted_message, parse_mode = format_ai_text("내용이 비어 있어요. 텍스트를 보내주세요.")
+        await context.bot.send_message(chat_id, formatted_message, parse_mode=parse_mode)
         return
 
     # Use Gemini to handle all text inputs, letting it determine the intent
-    prompt = (
-        f"사용자의 요청: {text}\n\n"
-        "이 요청에 대해 자연스럽게 대화하거나, 필요한 경우 분석/요약하여 응답해주세요. "
-        "출력은 마크다운 없이 순수 텍스트로 답변하세요."
-    )
+    prompt = f"사용자의 요청: {text}\n\n이 요청에 대해 자연스럽게 대화하거나, 필요한 경우 분석/요약하여 응답해주세요."
     res = generate_text_safe(prompt)
     
     if res.get("ok"):
-        await context.bot.send_message(chat_id, res["text"]) 
+        formatted_message, parse_mode = format_ai_text(res["text"])
+        await context.bot.send_message(chat_id, formatted_message, parse_mode=parse_mode)
     else:
-        await context.bot.send_message(chat_id, "요청 처리 중 문제가 발생했습니다. 표현을 조금 바꿔 다시 시도해 주세요.")
+        formatted_message, parse_mode = format_ai_text("요청 처리 중 문제가 발생했습니다. 표현을 조금 바꿔 다시 시도해 주세요.")
+        await context.bot.send_message(chat_id, formatted_message, parse_mode=parse_mode)
 # === [/AUTO-INJECT] ===
 
 
@@ -299,7 +371,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # Transcribe
         transcription = transcribe_audio(wav_path)
         if transcription == "음성 전사에 실패했습니다.":
-            await update.message.reply_text(transcription)
+            formatted_message, parse_mode = format_ai_text(transcription)
+            await update.message.reply_text(formatted_message, parse_mode=parse_mode)
             os.unlink(ogg_path)
             os.unlink(wav_path)
             return
@@ -719,10 +792,7 @@ def main():
     application = build_app()
 
     # === [AUTO-INJECT] register commands ===
-    try:
-        register_mode_commands(application)  # application은 기존 Telegram Application 인스턴스
-    except Exception:
-        pass
+    # Commands are registered in build_app()
 
 
     # === [AUTO-INJECT] drive schedule ===
