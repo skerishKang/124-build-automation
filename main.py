@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 # Environment variables (loaded from .env file or environment)
 # WARNING: Never commit hardcoded API keys to version control
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OWNER_ID = os.getenv("OWNER_ID")
 

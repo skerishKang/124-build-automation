@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
+from pathlib import Path
 
 
 
@@ -114,7 +115,7 @@ try:
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
     ]
     model = genai.GenerativeModel(
-        'gemini-2.5-pro',
+        'gemini-2.5-flash',
         generation_config=generation_config,
         safety_settings=safety_settings
     )
@@ -156,10 +157,12 @@ def transcribe_audio(wav_path: str) -> str:
         with open(wav_path, 'rb') as audio_file:
             audio_data = audio_file.read()
 
-        res = generate_vision_safe(
+        # Audio transcription using Gemini
+        response = model.generate_content([
             "Transcribe this audio to text. Provide only the text without explanations.",
-            parts=[{"mime_type": "audio/wav", "data": audio_data}]
-        )
+            {"mime_type": "audio/wav", "data": audio_data}
+        ])
+        res = {"ok": True, "text": response.text, "error": None}
         response = res.get("text") if res.get("ok") else "음성 전사에 실패했습니다." 
         return response.strip() if response else "음성 전사에 실패했습니다."
     except Exception as e:
@@ -278,24 +281,7 @@ def map_reduce_summarize(text: str, max_chunk_size: int = 8000, max_final_summar
         return f"요약 중 오류 발생: {str(e)}"
 
 
-def format_ai_text(text: str) -> tuple[str, Optional[str]]:
-    """
-    Format AI text for Telegram messages with markdown support
-    Returns tuple of (formatted_text, parse_mode)
-    """
-    if not text:
-        return "", None
-
-    # Check if text contains markdown formatting
-    has_markdown = any(char in text for char in ['*', '_', '`', '['])
-
-    if has_markdown:
-        return text, "Markdown"
-    else:
-        return text, None
-
-
-def generate_vision_safe(prompt: str, image_path: str = None, temperature: float = 0.7, max_tokens: int = 1000) -> dict:
+def generate_vision_safe(prompt: str, image_path: str = None, parts: list = None, temperature: float = 0.7, max_tokens: int = 1000) -> dict:
     """
     Analyze image with Gemini Vision API
     Returns dict with 'ok', 'text', and 'error' keys
@@ -305,13 +291,15 @@ def generate_vision_safe(prompt: str, image_path: str = None, temperature: float
 
     try:
         if image_path:
-            # Image analysis
-            import google.generativeai as genai
+            # Image analysis using file path
             image_part = {
                 "mime_type": "image/jpeg",
                 "data": Path(image_path).read_bytes()
             }
             response = model.generate_content([prompt, image_part])
+        elif parts:
+            # Image analysis using parts array (backward compatibility)
+            response = model.generate_content([prompt] + parts)
         else:
             # Text-only analysis
             response = model.generate_content(prompt)
