@@ -191,19 +191,16 @@ def transcribe_audio(wav_path: str) -> str:
                 logger.error(f"Whisper transcription error: {e}")
                 return "음성 전사에 실패했습니다."
 
-        # Fallback to Gemini transcription if available
-        if not model:
-            return "Gemini client not initialized."
-
-        with open(wav_path, 'rb') as audio_file:
-            audio_data = audio_file.read()
-
-        response = model.generate_content([
-            "Transcribe this audio to text. Provide only the text without explanations.",
-            {"mime_type": "audio/wav", "data": audio_data}
-        ])
-        txt = getattr(response, "text", "")
-        return txt.strip() if txt else "음성 전사에 실패했습니다."
+        # Fallback to generate_text_safe for transcription
+        try:
+            res = generate_text_safe(
+                prompt="Transcribe this audio to text. Provide only the text without explanations.",
+                max_tokens=1024
+            )
+            return res.get("text", "음성 전사에 실패했습니다.") if res.get("ok") else "음성 전사에 실패했습니다."
+        except Exception as e:
+            logger.error(f"Transcription error: {e}")
+            return "음성 전사에 실패했습니다."
     except Exception as e:
         logger.error(f"Error transcribing: {e}")
         return "음성 전사에 실패했습니다."
@@ -252,9 +249,6 @@ def map_reduce_summarize(text: str, max_chunk_size: int = 8000, max_final_summar
     2. 각 청크 요약 (Map)
     3. 요약 내용 합쳐서 최종 요약 (Reduce)
     """
-    if not model:
-        return "Gemini client not initialized."
-
     try:
         # 텍스트가 짧으면 일반 요약
         if len(text) <= max_chunk_size:
