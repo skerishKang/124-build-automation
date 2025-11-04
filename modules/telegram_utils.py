@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram formatting helpers to safely use MarkdownV2
+Telegram formatting helpers to safely use Markdown/HTML
 """
 
 import os
 import re
 import html
 from telegram.helpers import escape_markdown
+
+TELEGRAM_MAX_LEN = 4096
 
 
 def escape_md(text: str) -> str:
@@ -83,3 +85,21 @@ def format_ai_text(text: str):
     if allow:
         return md_to_html_basic(text), 'HTML'
     return escape_md(text), 'MarkdownV2'
+
+
+def strip_html_tags(html_text: str) -> str:
+    """Very small HTML stripper to plain text for summarization."""
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_text or "", "html.parser")
+        return soup.get_text(separator="\n")
+    except Exception:
+        # Fallback: naive tag removal
+        return re.sub(r"<[^>]+>", " ", html_text or "")
+
+
+def chunk_text(text: str, limit: int = TELEGRAM_MAX_LEN - 100):
+    """Yield chunks within Telegram length limits."""
+    text = text or ""
+    for i in range(0, len(text), limit):
+        yield text[i:i+limit]
