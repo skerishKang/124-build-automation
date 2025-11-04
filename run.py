@@ -37,6 +37,16 @@ def main():
 
     mode = (os.getenv("BOT_MODE","polling")).lower()
     lock_name = os.getenv("LOCK_FILE","automation_hub.lock")
+    # Ensure log directory exists when using file-based logging
+    try:
+        import os
+        log_file = os.getenv("LOG_FILE")
+        if log_file:
+            d = os.path.dirname(log_file)
+            if d:
+                os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
 
     try:
         # 2) 락 먼저 획득

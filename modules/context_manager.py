@@ -119,11 +119,19 @@ class ContextManager:
 
 def build_prompt_with_context(ctx_mgr: ContextManager, chat_id: str, current_text: str) -> str:
     if not ctx_mgr.available():
-        return f"사용자의 요청: {current_text}\n\n이 요청에 대해 자연스럽게 대화하거나, 필요한 경우 분석/요약하여 응답해주세요."
+        return (
+            f"사용자의 요청: {current_text}\n\n"
+            "이 요청에 대해 자연스럽게 대화하거나, 필요한 경우 분석/요약하여 응답해주세요. "
+            "모든 답변은 한국어로만 작성하고, 마크다운 없이 순수 텍스트로 제공하세요. 이모지와 특수 포맷은 사용하지 마세요."
+        )
     try:
         context_msgs = ctx_mgr.get_context(chat_id, limit=8)
         if not context_msgs:
-            return f"사용자의 요청: {current_text}\n\n이 요청에 대해 자연스럽게 대화하거나, 필요한 경우 분석/요약하여 응답해주세요."
+            return (
+                f"사용자의 요청: {current_text}\n\n"
+                "이 요청에 대해 자연스럽게 대화하거나, 필요한 경우 분석/요약하여 응답해주세요. "
+                "모든 답변은 한국어로만 작성하고, 마크다운 없이 순수 텍스트로 제공하세요. 이모지와 특수 포맷은 사용하지 마세요."
+            )
         context_parts = []
         for msg in context_msgs:
             role = "사용자" if msg.get("role") == "user" else "어시스턴트"
@@ -139,6 +147,6 @@ def build_prompt_with_context(ctx_mgr: ContextManager, chat_id: str, current_tex
 
 사용자의 현재 요청: {current_text}
 
-위 맥락을 참고하여 자연스럽게 응답하거나, 필요한 경우 분석/요약해주세요."""
+위 맥락을 참고하여 자연스럽게 응답하거나, 필요한 경우 분석/요약해주세요. 모든 답변은 한국어로만 작성하고, 마크다운 없이 순수 텍스트로 제공하세요. 이모지와 특수 포맷은 사용하지 마세요."""
     except Exception:
         return f"사용자의 요청: {current_text}\n\n이 요청에 대해 자연스럽게 대화하거나, 필요한 경우 분석/요약하여 응답해주세요."

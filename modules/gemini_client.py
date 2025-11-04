@@ -8,6 +8,7 @@ import base64
 from typing import Dict, Any, List
 
 import google.generativeai as genai
+import requests
 
 try:
     import anthropic  # type: ignore
@@ -38,28 +39,51 @@ def _mk_anthropic_client():
     return anthropic.Anthropic(api_key=api_key, base_url=base_url)
 
 
+def _minimax_base_url() -> str:
+    base = os.getenv("MINIMAX_BASE_URL", "https://api.minimax.io/anthropic").rstrip("/")
+    return base + "/v1/messages"
+
+
+def _minimax_headers() -> Dict[str, str]:
+    token = os.getenv("MINIMAX_API_TOKEN", "")
+    if not token:
+        raise RuntimeError("MINIMAX_API_TOKEN not set")
+    version = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "anthropic-version": version,
+    }
+
+
 def generate_text_safe(prompt: str, temperature: float = 0.7, max_tokens: int = 1024) -> Dict[str, Any]:
     """Generate text safely with error handling (Gemini or MiniMax)."""
     try:
         if _provider() == "minimax":
-            client = _mk_anthropic_client()
+            # Use direct HTTP to satisfy Authorization header requirement
+            url = _minimax_base_url()
+            headers = _minimax_headers()
             model_name = _minimax_model_name()
+            payload = {
+                "model": model_name,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": prompt}]}
+                ],
+            }
             try:
-                msg = client.messages.create(
-                    model=model_name,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    messages=[{"role": "user", "content": prompt}],
-                )
+                resp = requests.post(url, headers=headers, json=payload, timeout=60)
+                if resp.status_code != 200:
+                    return {"ok": False, "text": "", "error": f"Error code: {resp.status_code} - {resp.text}"}
+                data = resp.json()
                 # Extract first text block
+                content = data.get("content") or []
                 text = ""
-                try:
-                    for block in getattr(msg, "content", []) or []:
-                        if getattr(block, "type", "") == "text" and getattr(block, "text", ""):
-                            text = block.text
-                            break
-                except Exception:
-                    text = str(msg)
+                for block in content:
+                    if block.get("type") == "text" and block.get("text"):
+                        text = block["text"]
+                        break
                 return {"ok": True, "text": text, "error": None}
             except Exception as e:
                 return {"ok": False, "text": "", "error": str(e)}
@@ -86,9 +110,10 @@ def generate_vision_safe(prompt: str, parts: List[Dict[str, Any]], *, temperatur
     """Generate vision analysis safely with error handling (Gemini or MiniMax)."""
     try:
         if _provider() == "minimax":
-            client = _mk_anthropic_client()
+            # Use direct HTTP with Authorization: Bearer <token>
+            url = _minimax_base_url()
+            headers = _minimax_headers()
             model_name = _minimax_model_name()
-            # Build anthropic content blocks: image(s) + text
             content_blocks: List[Dict[str, Any]] = []
             for p in parts or []:
                 mime = p.get("mime_type") or "image/jpeg"
@@ -103,21 +128,25 @@ def generate_vision_safe(prompt: str, parts: List[Dict[str, Any]], *, temperatur
                     },
                 })
             content_blocks.append({"type": "text", "text": prompt})
+            payload = {
+                "model": model_name,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "messages": [
+                    {"role": "user", "content": content_blocks}
+                ],
+            }
             try:
-                msg = client.messages.create(
-                    model=model_name,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    messages=[{"role": "user", "content": content_blocks}],
-                )
+                resp = requests.post(url, headers=headers, json=payload, timeout=60)
+                if resp.status_code != 200:
+                    return {"ok": False, "text": "", "error": f"Error code: {resp.status_code} - {resp.text}"}
+                data = resp.json()
+                content = data.get("content") or []
                 text = ""
-                try:
-                    for block in getattr(msg, "content", []) or []:
-                        if getattr(block, "type", "") == "text" and getattr(block, "text", ""):
-                            text = block.text
-                            break
-                except Exception:
-                    text = str(msg)
+                for block in content:
+                    if block.get("type") == "text" and block.get("text"):
+                        text = block["text"]
+                        break
                 return {"ok": True, "text": text, "error": None}
             except Exception as e:
                 return {"ok": False, "text": "", "error": str(e)}

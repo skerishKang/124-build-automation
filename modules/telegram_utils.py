@@ -80,3 +80,16 @@ def strip_html_tags(text: str) -> str:
     if not text:
         return ""
     return re.sub(r'<[^>]+>', '', text)
+
+def strip_markdown_formatting(text: str) -> str:
+    """Remove common Markdown formatting tokens to produce plain text."""
+    if not text:
+        return ""
+    # Remove inline code and emphasis markers
+    text = text.replace('**', '').replace('__', '')
+    text = text.replace('*', '').replace('_', '').replace('`', '')
+    # Remove heading markers like #, ## at line start
+    text = re.sub(r'^\s*#{1,6}\s*', '', text, flags=re.MULTILINE)
+    # Normalize list bullets
+    text = re.sub(r'^\s*[-*]\s+', '- ', text, flags=re.MULTILINE)
+    return text

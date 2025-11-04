@@ -55,6 +55,12 @@ except ImportError:
 
 # Configure logging
 LOG_FILE = os.getenv('LOG_FILE', 'automation_hub.log')
+_log_dir = os.path.dirname(LOG_FILE)
+if _log_dir:
+    try:
+        os.makedirs(_log_dir, exist_ok=True)
+    except Exception:
+        pass
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -254,7 +260,7 @@ def map_reduce_summarize(text: str, max_chunk_size: int = 8000, max_final_summar
         # 텍스트가 짧으면 일반 요약
         if len(text) <= max_chunk_size:
             prompt = f"""다음 텍스트를 간결하게 요약해주세요.
-핵심 내용만 {max_final_summary}자 이내로 정리해주세요.
+핵심 내용만 {max_final_summary}자 이내로 정리해주세요. 한국어로만 작성하고, 마크다운 없이 순수 텍스트로 출력하세요.
 
 텍스트:
 {text}
@@ -287,7 +293,7 @@ def map_reduce_summarize(text: str, max_chunk_size: int = 8000, max_final_summar
         # 각 청크별 요약 (Map)
         chunk_summaries = []
         for i, chunk in enumerate(chunks):
-            prompt = f"""이 텍스트의 핵심 내용을 간결하게 요약해주세요.
+            prompt = f"""이 텍스트의 핵심 내용을 간결하게 요약해주세요. 한국어로만 작성하고, 마크다운 없이 순수 텍스트로 출력하세요.
 {i+1}/{len(chunks)}번째 부분입니다.
 
 내용:
@@ -302,8 +308,8 @@ def map_reduce_summarize(text: str, max_chunk_size: int = 8000, max_final_summar
         if chunk_summaries:
             combined_summaries = "\n\n".join([f"- {s}" for s in chunk_summaries])
             final_prompt = f"""다음은 긴 텍스트를 부분별로 요약한 내용입니다.
-이를 전체를 아우르는 하나의连贯된 요약으로 정리해주세요.
-{max_final_summary}자 이내로 간결하게 정리해주세요.
+이를 전체를 아우르는 하나의 일관된 요약으로 정리해주세요.
+{max_final_summary}자 이내로 간결하게, 한국어로만 작성하고 마크다운 없이 순수 텍스트로 출력하세요.
 
 부분별 요약:
 {combined_summaries}
@@ -402,7 +408,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === [AUTO-INJECT] message routing ===
 from modules.gemini_client import generate_text_safe
-from modules.telegram_utils import format_ai_text, chunk_text, strip_html_tags
+from modules.telegram_utils import format_ai_text, chunk_text, strip_html_tags, strip_markdown_formatting
 
 async def handle_text(update, context):
     chat_id = update.effective_chat.id
@@ -443,6 +449,10 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     voice = update.message.voice
 
     logger.info(f"Received voice from user {user_id}")
+    try:
+        await update.message.reply_text("음성 파일을 받았습니다. 전사 중입니다…")
+    except Exception:
+        pass
 
     try:
         # Download and convert
@@ -513,6 +523,10 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
 
     logger.info(f"Received image from user {user_id}")
+    try:
+        await update.message.reply_text("이미지를 받았습니다. 분석 중입니다…")
+    except Exception:
+        pass
 
     # Use provider-aware vision regardless of local Gemini model state
 
@@ -527,11 +541,12 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Increase max tokens and handle finish_reason gracefully inside helper
         res = generate_vision_safe(
-            "이미지를 상세히 분석해주세요. 핵심 내용과 세부사항을 모두 포함해서 설명해주세요.",
+            "이미지를 상세히 분석해주세요. 핵심 내용과 세부사항을 모두 포함해 한국어로만 설명하세요. 마크다운 없이 순수 텍스트로 작성하세요.",
             parts=[{"mime_type": "image/jpeg", "data": image_data}],
             max_tokens=int(os.getenv("VISION_MAX_TOKENS", "4096"))
         )
         analysis = res.get("text") if res.get("ok") else (res.get("error") or "이미지 분석에 실패했습니다.")
+        analysis = strip_markdown_formatting(analysis)
         # Send chunked if too long
         for chunk in chunk_text(analysis):
             await update.message.reply_text(chunk)
@@ -565,6 +580,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Received document from user {user_id}: {document.file_name}")
 
     try:
+        # Quick ack
+        try:
+            await update.message.reply_text(f"파일을 받았습니다: {document.file_name} 처리 중입니다…")
+        except Exception:
+            pass
+
         file = await context.bot.get_file(document.file_id)
         file_ext = os.path.splitext(document.file_name)[1].lower()
         temp_file = tempfile.NamedTemporaryFile(suffix=file_ext, delete=False)
@@ -601,10 +622,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 content = "텍스트 추출 실패"
             if len(content) > preview_limit:
                 preview = content[:preview_limit]
-                message = f"📄 파일 내용 (앞부분 {preview_limit}자):\n\n{preview}\n\n… (이하 생략)"
+                preview = strip_markdown_formatting(preview)
+                message = f"파일 내용 (앞부분 {preview_limit}자):\n\n{preview}\n\n… (이하 생략)"
                 summary = preview  # provide preview as summary for downstream integrations
             else:
-                message = f"📄 파일 내용:\n\n{content}"
+                content = strip_markdown_formatting(content)
+                message = f"파일 내용:\n\n{content}"
                 summary = content
             for chunk in chunk_text(message):
                 await update.message.reply_text(chunk)
@@ -614,7 +637,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 summary = map_reduce_summarize(text_content)
             else:
                 summary = text_content or "텍스트 추출 실패"
-            message = f"📄 문서 분석 결과:\n\n요약:\n{summary}"
+            summary = strip_markdown_formatting(summary)
+            message = f"문서 요약:\n\n{summary}"
             for chunk in chunk_text(message):
                 await update.message.reply_text(chunk)
 
