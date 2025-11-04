@@ -1,105 +1,78 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Telegram formatting helpers to safely use Markdown/HTML
+Telegram utilities for message formatting and processing
 """
 
-import os
 import re
-import html
-from telegram.helpers import escape_markdown
+from typing import Tuple
 
-TELEGRAM_MAX_LEN = 4096
+def format_ai_text(text: str) -> Tuple[str, str]:
+    """Format AI response text for Telegram with proper markdown"""
+    if not text:
+        return "응답이 비어있습니다.", "Markdown"
 
+    # Try to determine if markdown should be used
+    # If text contains markdown elements, use MarkdownV2
+    markdown_indicators = ['**', '*', '`', '_', '[', ']', '(', ')']
+    use_markdown_v2 = any(indicator in text for indicator in markdown_indicators)
 
-def escape_md(text: str) -> str:
-    """Escape text for Telegram MarkdownV2."""
-    if text is None:
+    # Clean up text for markdown
+    # Escape special characters for MarkdownV2
+    if use_markdown_v2:
+        special_chars = ['.', '(', ')', '-', '+', '=', '{', '}', '[', ']', '!', '|', ':']
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        return text, "MarkdownV2"
+    else:
+        return text, "Markdown"
+
+def chunk_text(text: str, max_length: int = 4096) -> list:
+    """Split text into chunks that fit within Telegram's message limit"""
+    if not text:
+        return []
+
+    # Simple chunking by length
+    chunks = []
+    current_chunk = ""
+
+    # Split by paragraphs first
+    paragraphs = text.split('\n\n')
+
+    for paragraph in paragraphs:
+        # If adding this paragraph would exceed max length
+        if len(current_chunk) + len(paragraph) + 2 > max_length:
+            # Save current chunk if not empty
+            if current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = ""
+
+        # If single paragraph is too long, split by sentences
+        if len(paragraph) > max_length:
+            sentences = re.split(r'(?<=[.!?])\s+', paragraph)
+            for sentence in sentences:
+                if len(current_chunk) + len(sentence) + 1 > max_length:
+                    if current_chunk:
+                        chunks.append(current_chunk)
+                    current_chunk = sentence + " "
+                else:
+                    if current_chunk:
+                        current_chunk += sentence + " "
+                    else:
+                        current_chunk = sentence + " "
+        else:
+            # Add paragraph to current chunk
+            if current_chunk:
+                current_chunk += "\n\n" + paragraph
+            else:
+                current_chunk = paragraph
+
+    # Add remaining chunk
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+def strip_html_tags(text: str) -> str:
+    """Strip HTML tags from text"""
+    if not text:
         return ""
-    return escape_markdown(text, version=2)
-
-
-def bold(text: str) -> str:
-    """Wrap text in MarkdownV2 bold safely."""
-    return f"*{escape_md(text)}*"
-
-
-def code(text: str) -> str:
-    """Wrap text in MarkdownV2 inline code safely."""
-    return f"`{escape_md(text)}`"
-
-
-def md_to_html_basic(text: str) -> str:
-    """Best-effort Markdown→HTML for Telegram HTML parse mode.
-    Handles code blocks, inline code, bold/italics, and links.
-    """
-    if text is None:
-        return ""
-
-    s = str(text)
-
-    # 1) Code blocks (``` ... ```)
-    code_map = {}
-    def _cb_repl(m):
-        idx = len(code_map)
-        content = m.group(1)
-        code_map[idx] = html.escape(content)
-        return f"{{CODEBLOCK_{idx}}}"
-    s = re.sub(r"```\s*([\s\S]*?)\s*```", _cb_repl, s)
-
-    # Escape HTML for the rest
-    s = html.escape(s)
-
-    # Inline code: `code`
-    s = re.sub(r"`([^`]+)`", lambda m: f"<code>{html.escape(m.group(1))}</code>", s)
-
-    # Bold: **text** or __text__
-    s = re.sub(r"\*\*(.+?)\*\*", lambda m: f"<b>{m.group(1)}</b>", s, flags=re.DOTALL)
-    s = re.sub(r"__(.+?)__", lambda m: f"<b>{m.group(1)}</b>", s, flags=re.DOTALL)
-
-    # Italic: *text* or _text_ (conservative for '_')
-    s = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", lambda m: f"<i>{m.group(1)}</i>", s, flags=re.DOTALL)
-    s = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", lambda m: f"<i>{m.group(1)}</i>", s, flags=re.DOTALL)
-
-    # Links: [text](url)
-    def _link_repl(m):
-        text = m.group(1)
-        url = m.group(2)
-        return f"<a href=\"{html.escape(url)}\">{text}</a>"
-    s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _link_repl, s)
-
-    # Restore code blocks
-    for idx, content in code_map.items():
-        s = s.replace(f"{{CODEBLOCK_{idx}}}", f"<pre><code>{content}</code></pre>")
-
-    return s
-
-
-def format_ai_text(text: str):
-    """
-    Return (formatted, parse_mode) for Telegram based on TG_ALLOW_AI_MARKDOWN.
-    - If enabled, convert Markdown-ish to HTML and use parse_mode='HTML'.
-    - Else, escape to MarkdownV2 and use parse_mode='MarkdownV2'.
-    """
-    allow = os.getenv("TG_ALLOW_AI_MARKDOWN", "").lower() in ("1", "true", "yes", "y")
-    if allow:
-        return md_to_html_basic(text), 'HTML'
-    return escape_md(text), 'MarkdownV2'
-
-
-def strip_html_tags(html_text: str) -> str:
-    """Very small HTML stripper to plain text for summarization."""
-    try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html_text or "", "html.parser")
-        return soup.get_text(separator="\n")
-    except Exception:
-        # Fallback: naive tag removal
-        return re.sub(r"<[^>]+>", " ", html_text or "")
-
-
-def chunk_text(text: str, limit: int = TELEGRAM_MAX_LEN - 100):
-    """Yield chunks within Telegram length limits."""
-    text = text or ""
-    for i in range(0, len(text), limit):
-        yield text[i:i+limit]
+    return re.sub(r'<[^>]+>', '', text)

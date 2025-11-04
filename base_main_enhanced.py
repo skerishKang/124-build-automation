@@ -8,12 +8,6 @@ Telegram + Google Drive + Gmail + Calendar + Notion + Slack + n8n + Gemini AI
 """
 
 import os
-# Load environment variables from .env if available
-try:
-    from dotenv import load_dotenv  # type: ignore
-    load_dotenv()
-except Exception:
-    pass
 import logging
 import tempfile
 import shutil
@@ -34,7 +28,6 @@ from pathlib import Path
 import google.generativeai as genai
 from modules.logging_setup import setup_logger
 from modules.env_check import assert_env
-from modules.context_manager import ContextManager, build_prompt_with_context
 try:
     from modules.drive_watcher import poll_drive_once
 except Exception:
@@ -64,11 +57,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# =============================================================================
-# CONVERSATION CONTEXT MANAGER (SUPABASE-BACKED)
-# =============================================================================
-ctx_mgr = ContextManager()
-
 # Reduce httpx logging noise
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -78,10 +66,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Core settings
 # WARNING: Never commit hardcoded API keys to version control
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OWNER_ID = os.getenv("OWNER_ID")
-LLM_PROVIDER = (os.getenv("LLM_PROVIDER", "gemini") or "gemini").lower()
 
 # Google Drive settings
 GOOGLE_SERVICE_JSON_PATH = os.getenv("GOOGLE_SERVICE_JSON_PATH", "service_account.json")
@@ -113,43 +100,29 @@ PROCESSED_FILES_DB = "processed_files.json"
 # GEMINI AI SETUP
 # =============================================================================
 
-model = None
-if LLM_PROVIDER == "gemini":
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        # Enhanced generation config for stability and performance
-        generation_config = {
-            "temperature": float(os.getenv("GEN_TEMPERATURE", "0.2")),
-            "top_p": 0.9,
-            "max_output_tokens": int(os.getenv("GEN_MAX_OUTPUT_TOKENS", "1024")),
-        }
-        safety_settings = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
-        # Allow override and default to a widely available model
-        GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
-        model = genai.GenerativeModel(
-            GEMINI_MODEL,
-            generation_config=generation_config,
-            safety_settings=safety_settings
-        )
-        logger.info(f"✅ Gemini AI initialized ({GEMINI_MODEL} with enhanced config)")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize Gemini: {e}")
-        model = None
-else:
-    logger.info("✅ LLM provider set to MiniMax (Anthropic-compatible)")
-
-# Validate required token early for clearer error than telegram.InvalidToken
-if not TELEGRAM_TOKEN:
-    logger.error(
-        "TELEGRAM_TOKEN is not set. Set it in your environment or .env (TELEGRAM_TOKEN=...)"
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    # Enhanced generation config for stability and performance
+    generation_config = {
+        "temperature": float(os.getenv("GEN_TEMPERATURE", "0.2")),
+        "top_p": 0.9,
+        "max_output_tokens": int(os.getenv("GEN_MAX_OUTPUT_TOKENS", "1024")),
+    }
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
+    model = genai.GenerativeModel(
+        'gemini-2.5-flash',
+        generation_config=generation_config,
+        safety_settings=safety_settings
     )
-    # Exit early to avoid confusing stack trace from the Telegram library
-    raise SystemExit(1)
+    logger.info("✅ Gemini AI initialized (gemini-2.5-flash with enhanced config)")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize Gemini: {e}")
+    model = None
 
 # =============================================================================
 # ENHANCED UTILITIES
@@ -176,34 +149,22 @@ def convert_voice_to_wav(input_path: str, output_path: str) -> bool:
 
 
 def transcribe_audio(wav_path: str) -> str:
-    """Transcribe audio to text using Whisper (if configured) or Gemini."""
+    """Transcribe audio to text using Gemini"""
+    if not model:
+        return "Gemini client not initialized."
+
     try:
-        tp = (os.getenv("TRANSCRIPTION_PROVIDER", "auto") or "auto").lower()
-
-        # Prefer Whisper if explicitly set, or when using MiniMax provider
-        if tp == "whisper" or (tp == "auto" and LLM_PROVIDER != "gemini"):
-            try:
-                from modules.whisper_transcriber import WhisperTranscriber
-                transcriber = WhisperTranscriber()
-                text = transcriber.transcribe(wav_path)
-                return text if text else "음성 전사에 실패했습니다."
-            except Exception as e:
-                logger.error(f"Whisper transcription error: {e}")
-                return "음성 전사에 실패했습니다."
-
-        # Fallback to Gemini transcription if available
-        if not model:
-            return "Gemini client not initialized."
-
         with open(wav_path, 'rb') as audio_file:
             audio_data = audio_file.read()
 
+        # Audio transcription using Gemini
         response = model.generate_content([
             "Transcribe this audio to text. Provide only the text without explanations.",
             {"mime_type": "audio/wav", "data": audio_data}
         ])
-        txt = getattr(response, "text", "")
-        return txt.strip() if txt else "음성 전사에 실패했습니다."
+        res = {"ok": True, "text": response.text, "error": None}
+        response = res.get("text") if res.get("ok") else "음성 전사에 실패했습니다." 
+        return response.strip() if response else "음성 전사에 실패했습니다."
     except Exception as e:
         logger.error(f"Error transcribing: {e}")
         return "음성 전사에 실패했습니다."
@@ -322,18 +283,28 @@ def map_reduce_summarize(text: str, max_chunk_size: int = 8000, max_final_summar
 
 def generate_vision_safe(prompt: str, image_path: str = None, parts: list = None, temperature: float = 0.7, max_tokens: int = 1000) -> dict:
     """
-    Provider-aware image analysis (MiniMax via Anthropic or Gemini)
+    Analyze image with Gemini Vision API
     Returns dict with 'ok', 'text', and 'error' keys
     """
+    if not model:
+        return {"ok": False, "text": "", "error": "Gemini client not initialized"}
+
     try:
-        from modules.gemini_client import generate_vision_safe as _provider_vision
-        if image_path and not parts:
+        if image_path:
+            # Image analysis using file path
             image_part = {
                 "mime_type": "image/jpeg",
                 "data": Path(image_path).read_bytes()
             }
-            parts = [image_part]
-        return _provider_vision(prompt, parts or [], temperature=temperature, max_tokens=max_tokens)
+            response = model.generate_content([prompt, image_part])
+        elif parts:
+            # Image analysis using parts array (backward compatibility)
+            response = model.generate_content([prompt] + parts)
+        else:
+            # Text-only analysis
+            response = model.generate_content(prompt)
+
+        return {"ok": True, "text": response.text, "error": None}
     except Exception as e:
         logger.error(f"Vision generation error: {e}")
         return {"ok": False, "text": "", "error": str(e)}
@@ -409,23 +380,12 @@ async def handle_text(update, context):
         await context.bot.send_message(chat_id, formatted_message, parse_mode=parse_mode)
         return
 
-    # Save user message to context
-    try:
-        user_id = update.effective_user.id
-    except Exception:
-        user_id = None
-    ctx_mgr.add(chat_id, user_id, "user", text, "text")
-
-    # Build prompt with recent context
-    prompt = build_prompt_with_context(ctx_mgr, chat_id, text)
+    # Use Gemini to handle all text inputs, letting it determine the intent
+    prompt = f"사용자의 요청: {text}\n\n이 요청에 대해 자연스럽게 대화하거나, 필요한 경우 분석/요약하여 응답해주세요."
     res = generate_text_safe(prompt)
-
+    
     if res.get("ok"):
-        answer = res["text"]
-        # Save assistant answer and maybe compress
-        ctx_mgr.add(chat_id, user_id, "assistant", answer, "text")
-        ctx_mgr.compress_if_needed(chat_id)
-        formatted_message, parse_mode = format_ai_text(answer)
+        formatted_message, parse_mode = format_ai_text(res["text"])
         await context.bot.send_message(chat_id, formatted_message, parse_mode=parse_mode)
     else:
         formatted_message, parse_mode = format_ai_text("요청 처리 중 문제가 발생했습니다. 표현을 조금 바꿔 다시 시도해 주세요.")
@@ -461,13 +421,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             os.unlink(wav_path)
             return
 
-        # Store user voice transcript in context
-        chat_id = update.effective_chat.id
-        ctx_mgr.add(chat_id, user_id, "user", f"[음성 전사]\n{transcription}", "voice")
-
-        # Analyze with Gemini with context
-        prompt = build_prompt_with_context(ctx_mgr, chat_id, f"음성 내용을 분석하고 요약:\n{transcription}")
-        res = generate_text_safe(prompt)
+        # Analyze with Gemini
+        res = generate_text_safe(f"음성 내용을 분석하고 요약해주세요. 출력은 마크다운 없이 순수 텍스트로 답변하세요.\n\n{transcription}")
         summary = res.get("text") if res.get("ok") else "음성 분석 및 요약에 실패했습니다." 
 
         message = (
@@ -476,10 +431,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             f"요약:\n{summary}"
         )
         await update.message.reply_text(message)
-
-        # Save assistant answer to context
-        ctx_mgr.add(chat_id, user_id, "assistant", summary, "voice")
-        ctx_mgr.compress_if_needed(chat_id)
 
         # Save to Notion
         if NOTION_TOKEN:
@@ -533,11 +484,6 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Send chunked if too long
         for chunk in chunk_text(analysis):
             await update.message.reply_text(chunk)
-
-        # Add to context as assistant message for future reference
-        chat_id = update.effective_chat.id
-        ctx_mgr.add(chat_id, user_id, "assistant", f"[이미지 분석]\n{analysis}", "image")
-        ctx_mgr.compress_if_needed(chat_id)
 
         # Save to Notion
         if NOTION_TOKEN:
