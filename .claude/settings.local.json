@@ -8,5 +8,10 @@
     "academic-search",
     "fetch",
     "github"
-  ]
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(git log --name-only --pretty=format:)"
+    ]
+  }
 }
