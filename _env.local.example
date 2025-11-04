@@ -1,0 +1,39 @@
+# This file (_env.local.example) is a template for your local development environment variables.
+# Rename this file to `.env.local` and fill in your actual values.
+# DO NOT commit `.env.local` to version control.
+
+# BOT
+BOT_MODE=polling
+LOCK_FILE=automation_hub.lock
+
+# TELEGRAM
+TELEGRAM_BOT_TOKEN=your-local-telegram-token # Get from BotFather
+TELEGRAM_WEBHOOK_URL= # Optional: Your local webhook URL if using ngrok or similar
+
+# GOOGLE
+DRIVE_FOLDER_ID= # Your Google Drive folder ID for local testing
+GOOGLE_PROJECT_ID= # Your Google Cloud Project ID
+GOOGLE_CLIENT_EMAIL= # Service account email for local testing
+GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n" # Service account private key for local testing (ensure proper escaping if pasting directly)
+
+# SLACK
+SLACK_BOT_TOKEN= # Your local Slack bot token (e.g., xoxb-...)
+SLACK_SIGNING_SECRET= # Your local Slack signing secret
+
+# NOTION
+NOTION_TOKEN= # Your local Notion integration token
+NOTION_DB_ID= # Your local Notion database ID
+
+# N8N
+N8N_BASE_URL= # Your local n8n instance URL (e.g., http://localhost:5678)
+N8N_WEBHOOK_PATH=/webhook-test/xxxxx/webhook # Your local n8n webhook path
+
+# PERF & LOG
+CONCURRENCY=5
+TIMEOUT_SEC=30
+LOG_LEVEL=INFO
+LOG_FILE=automation_hub.log
+
+# GEMINI AI
+GEMINI_API_KEY=your-local-gemini-api-key # Your Gemini API key for local development
+OWNER_ID=your-telegram-user-id # Your Telegram user ID for receiving notifications

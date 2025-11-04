@@ -12,6 +12,7 @@ from typing import Dict, List
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+from modules.gemini_client import generate_text_safe
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,10 @@ class SlackHandler:
             return None
 
         try:
+            # Slack renders basic Markdown by default; no parse_mode needed
             response = self.client.chat_postMessage(
                 channel=channel,
-                text=text
+                text=text,
             )
             logger.info(f"Message sent to Slack channel {channel}")
             return response
@@ -125,7 +127,7 @@ class SlackHandler:
 
     def get_channel_messages(self, channel: str, limit: int = 10):
         """
-        Get recent messages from channel
+        Get recent messages from channel or DM
         """
         if not self.client:
             logger.warning("Slack not configured. Skipping message retrieval.")
@@ -178,10 +180,19 @@ def slack_watcher_thread(gemini_analyzer, telegram_bot=None):
                     processed_messages.add(msg_id)
                     continue
 
-                # Check if message contains trigger words
+                # Check if message contains trigger words or bot mention
                 trigger_words = ['@analyze', '分析해줘', '요약', 'summary', '분석']
-                if any(word in text.lower() for word in trigger_words):
+                # Check for bot mention (강민준 팀장)
+                bot_mentioned = '<@U' in text or '@강민준 팀장' in text
+
+                if any(word in text.lower() for word in trigger_words) or bot_mentioned:
                     logger.info(f"[Slack] Analyzing message: {text[:50]}")
+
+                    # Acknowledge in Slack
+                    try:
+                        slack_handler.send_message(SLACK_CHANNEL_ID, "🧠 메시지 분석 중…")
+                    except Exception:
+                        pass
 
                     # Analyze with Gemini
                     prompt = f"""
@@ -193,30 +204,53 @@ def slack_watcher_thread(gemini_analyzer, telegram_bot=None):
 1. 메시지의 핵심 내용
 2. 요청된 작업이나 질문
 3. 권장 응답 또는 액션
+출력은 마크다운 없이 순수 텍스트로 답변하세요.
 """
                     try:
-                        summary = gemini_analyzer.analyze_text(prompt)
+                        # Use robust safe wrapper for consistency
+                        summary_res = generate_text_safe(prompt)
+                        if summary_res.get("ok"):
+                            summary = summary_res["text"]
+                            logger.info(f"[Slack] Analysis OK, length={len(summary)}")
+                            # Send analysis back to Slack
+                            response = f"*Analysis:*\n{summary}"
+                            slack_handler.send_message(SLACK_CHANNEL_ID, response)
 
-                        # Send analysis back to Slack
-                        response = f"*Analysis:*\n{summary}"
-                        slack_handler.send_message(SLACK_CHANNEL_ID, response)
-
-                        # Also send to Telegram if configured
-                        if telegram_bot:
-                            import asyncio
-                            telegram_msg = f"""💬 **Slack 분석 완료**
-
-**메시지:** {text[:100]}
-**분석 결과:**
-{summary}
-"""
-                            asyncio.run(telegram_bot.send_message(
-                                chat_id=os.getenv("OWNER_ID"),
-                                text=telegram_msg
-                            ))
-                            logger.info(f"[Telegram] Slack analysis sent")
+                            # Also send to Telegram if configured
+                            if telegram_bot:
+                                import asyncio
+                                # Plain text message for Telegram (no Markdown)
+                                telegram_msg = (
+                                    "💬 Slack 분석 완료\n\n"
+                                    f"메시지:\n{text[:100]}\n\n"
+                                    f"분석 결과:\n{summary}"
+                                )
+                                try:
+                                    # Use loop.run_until_complete instead of asyncio.run
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        # If loop is running, create a task (send as plain text to avoid parse issues)
+                                        asyncio.create_task(telegram_bot.send_message(
+                                            chat_id=os.getenv("OWNER_ID"),
+                                            text=telegram_msg
+                                        ))
+                                    else:
+                                        # If loop is not running, use run_until_complete
+                                        loop.run_until_complete(telegram_bot.send_message(
+                                            chat_id=os.getenv("OWNER_ID"),
+                                            text=telegram_msg
+                                        ))
+                                    logger.info(f"[Telegram] Slack analysis sent")
+                                except Exception as e:
+                                    logger.error(f"[Telegram] Failed to send message: {e}")
+                        else:
+                            error_msg = f"❌ Slack 메시지 분석 중 오류 발생: {summary_res.get('reason', '알 수 없는 오류')}"
+                            slack_handler.send_message(SLACK_CHANNEL_ID, error_msg)
+                            logger.error(f"Gemini analysis failed for Slack message: {summary_res.get('reason', 'unknown error')}")
 
                     except Exception as e:
+                        error_msg = f"❌ Slack 메시지 분석 중 예외 발생: {e}"
+                        slack_handler.send_message(SLACK_CHANNEL_ID, error_msg)
                         logger.error(f"Error analyzing Slack message: {e}")
 
                 # Mark as processed

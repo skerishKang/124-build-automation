@@ -7,7 +7,7 @@ Centralized Gemini AI analysis for all modules
 
 import os
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import google.generativeai as genai
 
@@ -44,12 +44,12 @@ class GeminiClient:
             logger.error(f"Error initializing Gemini client: {e}")
             self.model = None
 
-    def analyze_text(self, text: str, prompt: str = None) -> str:
+    def analyze_text(self, text: str, prompt: str = None) -> Dict[str, Any]:
         """
         Analyze text with custom prompt
         """
         if not self.model:
-            return "Gemini client not initialized."
+            return {"ok": False, "reason": "Gemini client not initialized."}
 
         try:
             if prompt:
@@ -61,17 +61,17 @@ class GeminiClient:
                 full_prompt,
                 safety_settings=self.safety_settings
             )
-            return response.text.strip()
+            blocked, reason = _is_blocked(response)
+            if blocked:
+                return {"ok": False, "blocked": True, "reason": reason, "text": ""}
+            return {"ok": True, "text": response.text.strip()}
 
         except Exception as e:
             logger.error(f"Error analyzing text: {e}")
-            # Check for block reason
-            try:
-                if e.response.prompt_feedback.block_reason:
-                    return "콘텐츠가 안전 정책에 의해 차단되었습니다."
-            except AttributeError:
-                pass
-            return f"분석 중 오류가 발생했습니다: {str(e)}"
+            blocked, reason = _is_blocked(e)
+            if blocked:
+                return {"ok": False, "blocked": True, "reason": reason or str(e), "text": ""}
+            return {"ok": False, "reason": f"분석 중 오류가 발생했습니다: {str(e)}"}
 
     def analyze_image(self, image_data: bytes, mime_type: str = "image/jpeg") -> str:
         """
@@ -208,7 +208,7 @@ def get_gemini_client() -> GeminiClient:
 
 
 # Convenience functions
-def analyze_text(text: str, prompt: str = None) -> str:
+def analyze_text(text: str, prompt: str = None) -> Dict[str, Any]:
     """Quick text analysis"""
     client = get_gemini_client()
     return client.analyze_text(text, prompt)
@@ -341,6 +341,52 @@ def generate_text_safe(prompt: str, *, temperature: float = 0.2, max_tokens: int
             )
             resp = model.generate_content(
                 prompt,
+                generation_config={"temperature": temperature, "max_output_tokens": max_tokens},
+            )
+            blocked, reason = _is_blocked(resp)
+            if blocked:
+                return {"ok": False, "blocked": True, "reason": reason, "text": ""}
+            text = ""
+            try:
+                text = getattr(resp, "text", None) or resp.candidates[0].content.parts[0].text
+            except Exception:
+                text = str(resp)
+            return {"ok": True, "blocked": False, "reason": "", "text": text}
+        except Exception as e:
+            blocked, reason = _is_blocked(e)
+            if blocked:
+                return {"ok": False, "blocked": True, "reason": reason or str(e), "text": ""}
+            last_err = e
+            continue
+    return {"ok": False, "blocked": False, "reason": str(last_err or "unknown"), "text": ""}
+# === [/AUTO-INJECT] ===
+
+def generate_vision_safe(prompt: str, parts: list, *, temperature: float = 0.2, max_tokens: int = 2048) -> Dict[str, Any]:
+    """
+    차단은 'blocked=True'로 명시하고, 일반 에러는 'error'로 구분해서 리턴.
+    호출측은 메시지를 분기 처리 가능.
+    """
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
+
+    # Prioritize models capable of handling vision
+    order = ["gemini-2.5-flash", "gemini-1.5-pro", "gemini-pro-vision"] # gemini-2.5-flash-latest, gemini-1.5-pro-latest
+    last_err = None
+    for model_name in order:
+        try:
+            real_model_name = _pick_supported(model_name)
+            logger.info(f"[Gemini Vision] using model: {real_model_name} (requested='{model_name}')")
+            model = genai.GenerativeModel(
+                model_name=real_model_name,
+                safety_settings=safety_settings
+            )
+            contents = [prompt] + parts
+            resp = model.generate_content(
+                contents,
                 generation_config={"temperature": temperature, "max_output_tokens": max_tokens},
             )
             blocked, reason = _is_blocked(resp)

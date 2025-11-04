@@ -1,0 +1,41 @@
+# This file (_env.prod.example) is a template for your production environment variables.
+# Rename this file to `.env.prod` and fill in your actual values.
+# DO NOT commit `.env.prod` to version control.
+# For production, consider using environment variables directly or a secure secret management system
+# instead of a .env file.
+
+# BOT
+BOT_MODE=webhook # Typically webhook in production
+LOCK_FILE=automation_hub.lock # Ensure this is managed appropriately in production
+
+# TELEGRAM
+TELEGRAM_BOT_TOKEN=your-production-telegram-token # Get from BotFather
+TELEGRAM_WEBHOOK_URL=https://your-production-domain/telegram/webhook # Your production webhook URL
+
+# GOOGLE
+DRIVE_FOLDER_ID= # Your Google Drive folder ID for production
+GOOGLE_PROJECT_ID= # Your Google Cloud Project ID
+GOOGLE_CLIENT_EMAIL= # Service account email for production
+GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n" # Service account private key for production (ensure proper escaping if pasting directly)
+
+# SLACK
+SLACK_BOT_TOKEN= # Your production Slack bot token (e.g., xoxb-...
+SLACK_SIGNING_SECRET= # Your production Slack signing secret
+
+# NOTION
+NOTION_TOKEN= # Your production Notion integration token
+NOTION_DB_ID= # Your production Notion database ID
+
+# N8N
+N8N_BASE_URL= # Your production n8n instance URL
+N8N_WEBHOOK_PATH=/webhook-test/xxxxx/webhook # Your production n8n webhook path
+
+# PERF & LOG
+CONCURRENCY=10 # Adjust for production load
+TIMEOUT_SEC=60 # Adjust for production needs
+LOG_LEVEL=INFO # Or WARNING/ERROR for production
+LOG_FILE=automation_hub.log # Ensure proper log rotation and storage in production
+
+# GEMINI AI
+GEMINI_API_KEY=your-production-gemini-api-key # Your Gemini API key for production
+OWNER_ID=your-telegram-user-id # Your Telegram user ID for receiving notifications

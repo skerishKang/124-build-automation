@@ -10,6 +10,7 @@ Telegram + Google Drive + Gmail + Calendar + Notion + Slack + n8n + Gemini AI
 import os
 import logging
 import tempfile
+import shutil
 import subprocess
 import threading
 import time
@@ -136,6 +137,9 @@ except Exception as e:
 def convert_voice_to_wav(input_path: str, output_path: str) -> bool:
     """Convert voice file (ogg/mp3) to wav format"""
     try:
+        if not shutil.which('ffmpeg'):
+            logger.error("ffmpeg not found. Please install ffmpeg and ensure it's in PATH.")
+            return False
         cmd = ['ffmpeg', '-i', input_path, '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', output_path, '-y']
         subprocess.run(cmd, check=True, capture_output=True)
         return True
@@ -153,10 +157,11 @@ def transcribe_audio(wav_path: str) -> str:
         with open(wav_path, 'rb') as audio_file:
             audio_data = audio_file.read()
 
-        response = safe_generate(
+        res = generate_vision_safe(
             "Transcribe this audio to text. Provide only the text without explanations.",
             parts=[{"mime_type": "audio/wav", "data": audio_data}]
         )
+        response = res.get("text") if res.get("ok") else "음성 전사에 실패했습니다." 
         return response.strip() if response else "음성 전사에 실패했습니다."
     except Exception as e:
         logger.error(f"Error transcribing: {e}")
@@ -189,88 +194,28 @@ def extract_text_from_docx(docx_path: str) -> str:
 
 def extract_text_from_txt(txt_path: str) -> str:
     """Extract text from TXT"""
-    try:
-        with open(txt_path, 'r', encoding='utf-8') as file:
-            return file.read()
-    except Exception as e:
-        logger.error(f"Error reading TXT: {e}")
-        return "TXT 파일 읽기 실패"
+    encodings = ['utf-8', 'utf-8-sig', 'cp949', 'euc-kr', 'latin-1']
+    for enc in encodings:
+        try:
+            with open(txt_path, 'r', encoding=enc, errors='replace') as file:
+                return file.read()
+        except Exception:
+            continue
+    return "텍스트 파일 읽기 실패"
 
-# === [AUTO-INJECT] convo mode state ===
-from collections import defaultdict
-from modules.intent_router import detect_intent
+# Treat common text-like extensions as plain text previewable types
+SUPPORTED_TEXT_EXTS = {
+    '.txt', '.md', '.markdown', '.json', '.jsonl', '.yaml', '.yml', '.csv', '.log', '.ini', '.cfg', '.conf',
+    '.py', '.js', '.ts', '.jsx', '.tsx', '.css', '.html', '.htm', '.xml', '.java', '.rb', '.go', '.rs', '.sh', '.bat', '.ps1', '.toml', '.sql'
+}
 
-# 채팅방/사용자별 모드 상태: 'chat' | 'analyze' | 'auto'
-_CONVO_MODE = defaultdict(lambda: "chat")  # 기본은 'chat'
 
-def set_mode(chat_id: int, mode: str):
-    mode = (mode or "chat").lower()
-    if mode not in ("chat", "analyze", "auto"):
-        mode = "chat"
-    _CONVO_MODE[chat_id] = mode
-    return mode
-
-def get_mode(chat_id: int):
-    return _CONVO_MODE[chat_id]
-# === [/AUTO-INJECT] ===
 
 # === [AUTO-INJECT] telegram commands ===
-async def cmd_chat(update, context):
-    m = set_mode(update.effective_chat.id, "chat")
-    await context.bot.send_message(update.effective_chat.id, "모드를 '대화(chat)'로 전환했습니다. 짧은 문장은 요약하지 않습니다.")
 
-async def cmd_analyze(update, context):
-    m = set_mode(update.effective_chat.id, "analyze")
-    await context.bot.send_message(update.effective_chat.id, "모드를 '분석(analyze)'로 전환했습니다. 긴/짧은 문서도 분석합니다.")
 
-async def cmd_auto(update, context):
-    m = set_mode(update.effective_chat.id, "auto")
-    await context.bot.send_message(update.effective_chat.id, "모드를 '자동(auto)'로 전환했습니다. 내용에 따라 대화/분석을 자동 선택합니다.")
 
-def register_mode_commands(app):
-    from telegram.ext import CommandHandler
-    app.add_handler(CommandHandler("chat", cmd_chat))
-    app.add_handler(CommandHandler("analyze", cmd_analyze))
-    app.add_handler(CommandHandler("auto", cmd_auto))
-# === [/AUTO-INJECT] ===
 
-# === [AUTO-INJECT] convo mode state ===
-from collections import defaultdict
-from modules.intent_router import detect_intent
-
-# 채팅방/사용자별 모드 상태: 'chat' | 'analyze' | 'auto'
-_CONVO_MODE = defaultdict(lambda: "chat")  # 기본은 'chat'
-
-def set_mode(chat_id: int, mode: str):
-    mode = (mode or "chat").lower()
-    if mode not in ("chat", "analyze", "auto"):
-        mode = "chat"
-    _CONVO_MODE[chat_id] = mode
-    return mode
-
-def get_mode(chat_id: int):
-    return _CONVO_MODE[chat_id]
-# === [/AUTO-INJECT] ===
-
-# === [AUTO-INJECT] telegram commands ===
-async def cmd_chat(update, context):
-    m = set_mode(update.effective_chat.id, "chat")
-    await context.bot.send_message(update.effective_chat.id, "모드를 '대화(chat)'로 전환했습니다. 짧은 문장은 요약하지 않습니다.")
-
-async def cmd_analyze(update, context):
-    m = set_mode(update.effective_chat.id, "analyze")
-    await context.bot.send_message(update.effective_chat.id, "모드를 '분석(analyze)'로 전환했습니다. 긴/짧은 문서도 분석합니다.")
-
-async def cmd_auto(update, context):
-    m = set_mode(update.effective_chat.id, "auto")
-    await context.bot.send_message(update.effective_chat.id, "모드를 '자동(auto)'로 전환했습니다. 내용에 따라 대화/분석을 자동 선택합니다.")
-
-def register_mode_commands(app):
-    from telegram.ext import CommandHandler
-    app.add_handler(CommandHandler("chat", cmd_chat))
-    app.add_handler(CommandHandler("analyze", cmd_analyze))
-    app.add_handler(CommandHandler("auto", cmd_auto))
-# === [/AUTO-INJECT] ===
 
 # =============================================================================
 # TELEGRAM BOT HANDLERS
@@ -278,122 +223,58 @@ def register_mode_commands(app):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
-    mode = context.user_data.get("mode", "auto")
-    welcome_message = f"""
-🤖 **AI 자동화 허브** 시작합니다! 🚀
-
-현재 모드: [{mode}]
-
-✅ **활성화된 기능:**
-• 📱 Telegram 메시지 분석 (개선된 의도 분류)
-• 🎤 음성 메시지 → 텍스트 변환
-• 🖼️ 이미지 분석 (Gemini Vision)
-• 📄 문서 분석 (PDF/DOCX/TXT)
-• 📁 Google Drive 자동 감시
-• 📧 Gmail 새 메일 분석
-• 📅 Calendar 리마인더
-• 💬 Slack 연동
-• 📝 Notion 자동 기록
-• 🔗 n8n 워크플로우 연동
-
-💡 `/mode chat | analyze | auto` 로 모드 전환 가능!
-
-파일이나 Google Drive에 업로드해보세요!
-AI가 자동으로 분석해서 결과를 알려드립니다.
-"""
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+    welcome_message_raw = (
+        "🤖 **AI 자동화 허브** 시작합니다! 🚀\n\n"
+        "✅ **활성화된 기능:**\n"
+        "• 📱 Telegram 메시지 분석 (Gemini가 자동으로 의도 판단)\n"
+        "• 🎤 음성 메시지 → 텍스트 변환 및 분석\n"
+        "• 🖼️ 이미지 분석 (Gemini Vision)\n"
+        "• 📄 문서 분석 (PDF/DOCX/TXT)\n"
+        "• 📁 Google Drive 자동 감시\n"
+        "• 📧 Gmail 새 메일 분석\n"
+        "• 📅 Calendar 리마인더\n"
+        "• 💬 Slack 연동\n"
+        "• 📝 Notion 자동 기록\n"
+        "• 🔗 n8n 워크플로우 연동\n\n"
+        "파일이나 Google Drive에 업로드해보세요!\n"
+        "AI가 자동으로 분석해서 결과를 알려드립니다."
+    )
+    formatted_message, parse_mode = format_ai_text(welcome_message_raw)
+    await update.message.reply_text(formatted_message, parse_mode=parse_mode)
     logger.info(f"New user started bot: {update.effective_user.id}")
 
 
-async def set_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /mode command to toggle response mode"""
-    user_id = update.effective_user.id
 
-    if not context.args:
-        # Show current mode
-        current_mode = context.user_data.get('mode', 'auto')
-        mode_descriptions = {
-            'auto': '자동 (의도에 따라 응답)',
-            'chat': '대화 모드 (모든 입력을 자연스러운 대화로 처리)',
-            'analyze': '분석 모드 (모든 입력을 요약/분석)'
-        }
-        description = mode_descriptions.get(current_mode, current_mode)
-        await update.message.reply_text(f"현재 모드: {description}\n\n사용법: /mode auto|chat|analyze")
+
+
+
+
+
+# === [AUTO-INJECT] message routing ===
+from modules.gemini_client import generate_text_safe
+from modules.telegram_utils import format_ai_text
+
+async def handle_text(update, context):
+    chat_id = update.effective_chat.id
+    text = (update.message.text or "").strip()
+
+    if not text:
+        await context.bot.send_message(chat_id, "내용이 비어 있어요. 텍스트를 보내주세요.")
         return
 
-    new_mode = context.args[0].lower()
-    if new_mode in ['auto', 'chat', 'analyze']:
-        context.user_data['mode'] = new_mode
-        mode_descriptions = {
-            'auto': '자동 (의도에 따라 응답)',
-            'chat': '대화 모드 (모든 입력을 자연스러운 대화로 처리)',
-            'analyze': '분석 모드 (모든 입력을 요약/분석)'
-        }
-        description = mode_descriptions.get(new_mode, new_mode)
-        await update.message.reply_text(f"✅ 모드가 {description}로 변경되었습니다.")
-        logger.info(f"User {user_id} changed mode to {new_mode}")
+    # Use Gemini to handle all text inputs, letting it determine the intent
+    prompt = (
+        f"사용자의 요청: {text}\n\n"
+        "이 요청에 대해 자연스럽게 대화하거나, 필요한 경우 분석/요약하여 응답해주세요. "
+        "출력은 마크다운 없이 순수 텍스트로 답변하세요."
+    )
+    res = generate_text_safe(prompt)
+    
+    if res.get("ok"):
+        await context.bot.send_message(chat_id, res["text"]) 
     else:
-        await update.message.reply_text("❌ 잘못된 모드입니다. 사용법: /mode auto|chat|analyze")
-
-
-# === [AUTO-INJECT] telegram short-circuit ===
-def _is_smalltalk(text: str) -> bool:
-    t = (text or "").strip().lower()
-    return t in {"hi", "hello", "안녕", "ㅎㅇ", "하이"} or (len(t) <= 5 and any(k in t for k in ["안녕","hi","ㅎㅇ","하이"]))
-
-def handle_incoming_text(text: str) -> str:
-    """
-    기존 파이프라인 진입 전, 짧은 인삿말/단문은 직접 응답으로 처리.
-    """
-    if not text or not text.strip():
-        return "내용이 비어 있어요. 분석할 텍스트를 보내주세요."
-    if _is_smalltalk(text):
-        return "안녕하세요! 무엇을 도와드릴까요? 😊"
-    # 길면 기존 Map-Reduce/요약 파이프라인으로
-    return None  # None이면 이후 요약 로직으로 진행
+        await context.bot.send_message(chat_id, "요청 처리 중 문제가 발생했습니다. 표현을 조금 바꿔 다시 시도해 주세요.")
 # === [/AUTO-INJECT] ===
-
-
-async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text messages with improved intent classification and error handling."""
-    user_text = update.message.text or ""
-    user_id = update.effective_user.id
-    logger.info(f"Received text from user {user_id}: {user_text[:50]}...")
-
-    try:
-        # 1. Use the short-circuit function for small talk
-        quick_response = handle_incoming_text(user_text)
-        if quick_response is not None:
-            await update.message.reply_text(quick_response)
-            return
-
-        # 2. For longer text, use the robust pipeline
-        from modules.gemini_client import generate_text_safe
-        
-        await update.message.reply_text("📝 텍스트를 분석 중입니다. 잠시만 기다려주세요...")
-
-        prompt = f"다음 텍스트를 분석하고, 내용을 요약한 뒤, 핵심 액션 아이템을 1~3개 제안해주세요.\n\n---\n{user_text}"
-        result = generate_text_safe(prompt)
-
-        if result["ok"]:
-            response_text = result["text"]
-        elif result.get("blocked"):
-            # 2nd-pass with a safer prompt
-            safe_prompt = f"규칙: 민감한 표현은 [REDACTED]로 치환하고, 핵심 요지만 중립적으로 요약해주세요.\n\n---\n{user_text}"
-            result2 = generate_text_safe(safe_prompt)
-            if result2["ok"]:
-                response_text = "해당 내용은 일부 민감할 수 있는 표현을 제외하고 중립적으로 요약했습니다.\n\n" + result2["text"]
-            else:
-                response_text = "요청을 처리할 수 없었습니다. 내용에 민감한 부분이 포함되어 있을 수 있습니다. 다른 표현으로 다시 시도해 주세요."
-        else:  # General error
-            response_text = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
-            logger.error(f"General error from generate_text_safe: {result.get('reason')}")
-
-        await update.message.reply_text(response_text)
-
-    except Exception as e:
-        logger.exception(f"Error in handle_text_message: {e}")
-        await update.message.reply_text("메시지 처리 중 예기치 않은 오류가 발생했습니다.")
 
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -412,7 +293,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         wav_path = ogg_path.replace('.ogg', '.wav')
         if not convert_voice_to_wav(ogg_path, wav_path):
-            await update.message.reply_text("❌ 음성 변환 실패")
+            await update.message.reply_text("❌ 음성 변환 실패 (ffmpeg가 설치되어 있는지 확인해 주세요)")
             return
 
         # Transcribe
@@ -424,10 +305,15 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         # Analyze with Gemini
-        summary = safe_generate(f"음성 내용을 분석하고 요약해주세요:\n\n{transcription}")
+        res = generate_text_safe(f"음성 내용을 분석하고 요약해주세요. 출력은 마크다운 없이 순수 텍스트로 답변하세요.\n\n{transcription}")
+        summary = res.get("text") if res.get("ok") else "음성 분석 및 요약에 실패했습니다." 
 
-        message = f"🎤 **음성 분석 결과:**\n\n**📄 전사:**\n{transcription}\n\n**📝 요약:**\n{summary}"
-        await update.message.reply_text(message, parse_mode='Markdown')
+        message = (
+            "🎤 음성 분석 결과:\n\n"
+            f"전사:\n{transcription}\n\n"
+            f"요약:\n{summary}"
+        )
+        await update.message.reply_text(message)
 
         # Save to Notion
         if NOTION_TOKEN:
@@ -471,13 +357,13 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(img_path, 'rb') as image_file:
             image_data = image_file.read()
 
-        analysis = safe_generate(
-            "이미지를 상세히 분석해주세요.",
+        res = generate_vision_safe(
+            "이미지를 상세히 분석해주세요. 출력은 마크다운 없이 순수 텍스트로 제공하세요.",
             parts=[{"mime_type": "image/jpeg", "data": image_data}]
         )
-
-        message = f"🖼️ **이미지 분석 결과:**\n\n{analysis}"
-        await update.message.reply_text(message, parse_mode='Markdown')
+        analysis = res.get("text") if res.get("ok") else "이미지 분석에 실패했습니다." 
+        message = f"🖼️ 이미지 분석 결과:\n\n{analysis}"
+        await update.message.reply_text(message)
 
         # Save to Notion
         if NOTION_TOKEN:
@@ -510,30 +396,42 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         temp_file.close()  # Close file handle explicitly
         doc_path = temp_file.name
 
-        # Extract text
+        # Extract content depending on type
         if file_ext == '.pdf':
             text_content = extract_text_from_pdf(doc_path)
+            mode = 'summary'
         elif file_ext == '.docx':
             text_content = extract_text_from_docx(doc_path)
-        elif file_ext in ['.txt', '.md', '.markdown']:
+            mode = 'summary'
+        elif file_ext in SUPPORTED_TEXT_EXTS:
             text_content = extract_text_from_txt(doc_path)
-        elif file_ext == '.json':
-            text_content = extract_text_from_txt(doc_path)
+            mode = 'preview'
         else:
-            await update.message.reply_text("❌ 지원하지 않는 형식입니다. (.pdf, .docx, .txt, .md, .json만 지원)")
+            await update.message.reply_text("❌ 지원하지 않는 형식입니다. (.pdf, .docx, .txt, .md, .json, .xml, .html, .css, .js, .py 등 텍스트 파일 지원)")
             if os.path.exists(doc_path):
                 os.unlink(doc_path)
             return
 
-        # Use map_reduce_summarize for all document processing
-        if text_content and "실패" not in text_content:
-            await update.message.reply_text("📄 문서가 길어 Map-Reduce 요약을 수행합니다…")
-            summary = map_reduce_summarize(text_content)
+        # For text-like files, show a plain text preview; for others, summarize
+        if mode == 'preview':
+            preview_limit = int(os.getenv('DOC_PREVIEW_LIMIT', '3500'))
+            content = (text_content or '')
+            if not content:
+                content = "텍스트 추출 실패"
+            if len(content) > preview_limit:
+                preview = content[:preview_limit]
+                message = f"📄 파일 내용 (앞부분 {preview_limit}자):\n\n{preview}\n\n… (이하 생략)"
+            else:
+                message = f"📄 파일 내용:\n\n{content}"
+            await update.message.reply_text(message)
         else:
-            summary = text_content or "텍스트 추출 실패"
-
-        message = f"📄 **문서 분석 결과:**\n\n**📝 요약:**\n{summary}"
-        await update.message.reply_text(message, parse_mode='Markdown')
+            if text_content and "실패" not in text_content:
+                await update.message.reply_text("📄 문서가 길어 Map-Reduce 요약을 수행합니다…")
+                summary = map_reduce_summarize(text_content)
+            else:
+                summary = text_content or "텍스트 추출 실패"
+            message = f"📄 문서 분석 결과:\n\n요약:\n{summary}"
+            await update.message.reply_text(message)
 
         # Save to Notion
         if NOTION_TOKEN:
@@ -646,18 +544,20 @@ def analyze_drive_file(file_path, mime_type):
         elif mime_type.startswith('image/'):
             with open(file_path, 'rb') as f:
                 data = f.read()
-            return safe_generate(
+            res = generate_vision_safe(
                 "이미지를 상세히 분석해주세요.",
                 parts=[{"mime_type": mime_type, "data": data}]
             )
+            return res.get("text") if res.get("ok") else "이미지 분석에 실패했습니다." 
         elif mime_type.startswith('audio/'):
             wav_path = file_path.replace(file_ext, '.wav')
             if convert_voice_to_wav(file_path, wav_path):
                 transcription = transcribe_audio(wav_path)
                 os.unlink(wav_path)
                 if model:
-                    summary = safe_generate(f"음성 내용을 분석해주세요:\n\n{transcription}")
-                    return f"**전사:**\n{transcription}\n\n**분석:**\n{summary}"
+                    res = generate_text_safe(f"음성 내용을 분석해주세요. 출력은 마크다운 없이 순수 텍스트로 제공하세요.\n\n{transcription}")
+                    summary = res.get("text") if res.get("ok") else "음성 분석에 실패했습니다."
+                    return f"전사:\n{transcription}\n\n분석:\n{summary}" 
                 return transcription
             return "음성 변환 실패"
         else:
@@ -676,7 +576,7 @@ async def send_telegram_message(bot, text):
     """Send message to Telegram"""
     try:
         if OWNER_ID:
-            await bot.send_message(chat_id=OWNER_ID, text=text, parse_mode='Markdown')
+            await bot.send_message(chat_id=OWNER_ID, text=text)
             logger.info(f"📱 Telegram message sent")
     except Exception as e:
         logger.error(f"Telegram send error: {e}")
@@ -712,14 +612,32 @@ def drive_watcher_thread(application):
                         continue
 
                     analysis = analyze_drive_file(file_path, mime_type)
-                    message = f"📂 [{file_name}]\n\n📝 **Gemini 분석 결과:**\n{analysis}"
+                    formatted_file, mode_file = format_ai_text(file_name)
+                    formatted_analysis, mode_ana = format_ai_text(analysis)
+                    mode = mode_file if mode_file == mode_ana else 'HTML'
+                    if mode == 'HTML':
+                        message = (
+                            f"📂 파일: {formatted_file}\n\n"
+                            f"<b>📝 Gemini 분석 결과:</b>\n{formatted_analysis}"
+                        )
+                    else:
+                        message = (
+                            f"📂 파일: {formatted_file}\n\n"
+                            f"*📝 Gemini 분석 결과:*\n{formatted_analysis}"
+                        )
 
-                    # Send to Telegram using asyncio.create_task
+                    # Override to plain text message (no Markdown)
+                    message = (
+                        f"📂 파일: {file_name}\n\n"
+                        f"📝 Gemini 분석 결과:\n{analysis}"
+                    )
+
+                    # Send to Telegram
                     import asyncio
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     try:
-                        loop.run_until_complete(send_telegram_message(application.bot, message))
+                        loop.run_until_complete(application.bot.send_message(chat_id=OWNER_ID, text=message))
                     finally:
                         loop.close()
 
@@ -756,7 +674,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     logger.warning(f'Error: {context.error}')
     if update and update.effective_message:
-        update.effective_message.reply_text("❌ 알 수 없는 오류가 발생했습니다.")
+        await update.effective_message.reply_text("❌ 알 수 없는 오류가 발생했습니다.")
 
 
 # =============================================================================
@@ -769,10 +687,10 @@ def build_app() -> Application:
     
     # Core handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("mode", set_mode))
+
     
     # Message handlers
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_image))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
@@ -805,14 +723,7 @@ def main():
         register_mode_commands(application)  # application은 기존 Telegram Application 인스턴스
     except Exception:
         pass
-    # === [/AUTO-INJECT] ===
 
-    # === [AUTO-INJECT] register commands ===
-    try:
-        register_mode_commands(application)  # application은 기존 Telegram Application 인스턴스
-    except Exception:
-        pass
-    # === [/AUTO-INJECT] ===
 
     # === [AUTO-INJECT] drive schedule ===
     import os, threading, time
