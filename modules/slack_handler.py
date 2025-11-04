@@ -8,6 +8,7 @@ Monitors Slack channels and sends analysis results
 import os
 import logging
 import time
+import threading
 from typing import Dict, List
 
 from slack_sdk import WebClient
@@ -156,8 +157,9 @@ def slack_watcher_thread(gemini_analyzer, telegram_bot=None):
 
     slack_handler = SlackHandler()
 
-    # Track processed messages
+    # Track processed messages with thread safety
     processed_messages = set()
+    messages_lock = threading.Lock()
 
     while True:
         try:
@@ -166,12 +168,16 @@ def slack_watcher_thread(gemini_analyzer, telegram_bot=None):
 
             for message in messages:
                 msg_id = message.get('ts')
-                if msg_id in processed_messages:
-                    continue
+
+                # Thread-safe check and add
+                with messages_lock:
+                    if msg_id in processed_messages:
+                        continue
 
                 # Skip bot messages
                 if message.get('bot_id'):
-                    processed_messages.add(msg_id)
+                    with messages_lock:
+                        processed_messages.add(msg_id)
                     continue
 
                 # Get message text
@@ -253,12 +259,14 @@ def slack_watcher_thread(gemini_analyzer, telegram_bot=None):
                         slack_handler.send_message(SLACK_CHANNEL_ID, error_msg)
                         logger.error(f"Error analyzing Slack message: {e}")
 
-                # Mark as processed
-                processed_messages.add(msg_id)
+                # Mark as processed (thread-safe)
+                with messages_lock:
+                    processed_messages.add(msg_id)
 
             # Clean old processed messages (keep only last 100)
-            if len(processed_messages) > 100:
-                processed_messages = set(list(processed_messages)[-100:])
+            with messages_lock:
+                if len(processed_messages) > 100:
+                    processed_messages = set(list(processed_messages)[-100:])
 
             # Wait before next check (30 seconds)
             time.sleep(30)

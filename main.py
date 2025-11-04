@@ -100,7 +100,7 @@ def transcribe_audio(wav_path: str) -> str:
         return response.text.strip()
     except Exception as e:
         logger.error(f"Error transcribing audio: {e}")
-        return "음성 转文字에 실패했습니다."
+        return "음성 전환에 실패했습니다."
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
@@ -196,6 +196,9 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     logger.info(f"Received voice message from user {user_id}")
 
+    ogg_path = None
+    wav_path = None
+
     try:
         # Download voice file
         file = await context.bot.get_file(voice.file_id)
@@ -212,7 +215,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # Transcribe audio
         transcription = transcribe_audio(wav_path)
 
-        if transcription == "음성 转文字에 실패했습니다.":
+        if transcription == "음성 전환에 실패했습니다.":
             await update.message.reply_text(transcription)
             return
 
@@ -222,15 +225,25 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         await update.message.reply_text(f"🎤 **음성 분석 결과:**\n\n**📄 변환된 텍스트:**\n{transcription}\n\n**📝 요약:**\n{summary}")
 
-        # Clean up temp files
-        os.unlink(ogg_path)
-        os.unlink(wav_path)
-
         logger.info(f"Sent voice analysis to user {user_id}")
 
     except Exception as e:
         logger.error(f"Error processing voice message: {e}")
         await update.message.reply_text("❌ 음성 메시지 처리 중 오류가 발생했습니다.")
+
+    finally:
+        # Ensure temporary files are cleaned up
+        if ogg_path and os.path.exists(ogg_path):
+            try:
+                os.unlink(ogg_path)
+            except Exception as e:
+                logger.error(f"Error cleaning up ogg file: {e}")
+
+        if wav_path and os.path.exists(wav_path):
+            try:
+                os.unlink(wav_path)
+            except Exception as e:
+                logger.error(f"Error cleaning up wav file: {e}")
 
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
