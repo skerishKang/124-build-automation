@@ -3,30 +3,14 @@ Telegram utilities for message formatting and processing
 """
 
 import re
+import os
 from typing import Tuple
 
-def format_ai_text(text: str) -> Tuple[str, str]:
-    """Format AI response text for Telegram with proper markdown"""
-    if not text:
-        return "응답이 비어있습니다.", "Markdown"
-
-    # Try to determine if markdown should be used
-    # If text contains markdown elements, use MarkdownV2
-    markdown_indicators = ['**', '*', '`', '_', '[', ']', '(', ')']
-    use_markdown_v2 = any(indicator in text for indicator in markdown_indicators)
-
-    # Clean up text for markdown
-    # Escape special characters for MarkdownV2
-    if use_markdown_v2:
-        special_chars = ['.', '(', ')', '-', '+', '=', '{', '}', '[', ']', '!', '|', ':']
-        for char in special_chars:
-            text = text.replace(char, f'\\{char}')
-        return text, "MarkdownV2"
-    else:
-        return text, "Markdown"
-
-def chunk_text(text: str, max_length: int = 4096) -> list:
+def chunk_text(text: str, max_length: int = None) -> list:
     """Split text into chunks that fit within Telegram's message limit"""
+    if max_length is None:
+        max_length = int(os.getenv('TELEGRAM_CHUNK_SIZE', '4096'))
+
     if not text:
         return []
 
@@ -70,6 +54,26 @@ def chunk_text(text: str, max_length: int = 4096) -> list:
         chunks.append(current_chunk)
 
     return chunks
+
+def format_ai_text(text: str) -> Tuple[str, str]:
+    """Format AI response text for Telegram with proper markdown"""
+    if not text:
+        return "응답이 비어있습니다.", "Markdown"
+
+    # Try to determine if markdown should be used
+    # If text contains markdown elements, use MarkdownV2
+    markdown_indicators = ['**', '*', '`', '_', '[', ']', '(', ')']
+    use_markdown_v2 = any(indicator in text for indicator in markdown_indicators)
+
+    # Clean up text for markdown
+    # Escape special characters for MarkdownV2
+    if use_markdown_v2:
+        special_chars = ['.', '(', ')', '-', '+', '=', '{', '}', '[', ']', '!', '|', ':']
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        return text, "MarkdownV2"
+    else:
+        return text, "Markdown"
 
 def strip_html_tags(text: str) -> str:
     """Strip HTML tags from text"""

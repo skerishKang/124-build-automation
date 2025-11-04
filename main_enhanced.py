@@ -54,11 +54,12 @@ except ImportError:
     logger.warning("Google Drive libraries not installed. Drive functionality will be disabled.")
 
 # Configure logging
+LOG_FILE = os.getenv('LOG_FILE', 'automation_hub.log')
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
     handlers=[
-        logging.FileHandler('automation_hub.log', encoding='utf-8'),
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -260,7 +261,11 @@ def map_reduce_summarize(text: str, max_chunk_size: int = 8000, max_final_summar
 
 요약:"""
             res = generate_text_safe(prompt, temperature=0.3, max_tokens=max_final_summary)
-            return res.get("text", "요약 실패") if res.get("ok") else "요약 실패"
+            if res.get("ok"):
+                return res.get("text", "요약 실패")
+            else:
+                logger.warning(f"summary(short) failed: {res.get('error')}")
+                return "요약 실패"
 
         # 긴 텍스트를 청크로 나누기
         chunks = []
@@ -305,7 +310,11 @@ def map_reduce_summarize(text: str, max_chunk_size: int = 8000, max_final_summar
 
 최종 요약:"""
             res = generate_text_safe(final_prompt, temperature=0.3, max_tokens=max_final_summary)
-            return res.get("text", "최종 요약 실패") if res.get("ok") else "최종 요약 실패"
+            if res.get("ok"):
+                return res.get("text", "최종 요약 실패")
+            else:
+                logger.warning(f"summary(reduce) failed: {res.get('error')}")
+                return "최종 요약 실패"
 
         return "요약할 수 있는 내용이 없습니다."
 
@@ -363,12 +372,13 @@ SUPPORTED_TEXT_EXTS = {
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
+    provider_label = "MiniMax" if LLM_PROVIDER == "minimax" else "Gemini"
     welcome_message_raw = (
         "🤖 **AI 자동화 허브** 시작합니다! 🚀\n\n"
         "✅ **활성화된 기능:**\n"
-        "• 📱 Telegram 메시지 분석 (Gemini가 자동으로 의도 판단)\n"
-        "• 🎤 음성 메시지 → 텍스트 변환 및 분석\n"
-        "• 🖼️ 이미지 분석 (Gemini Vision)\n"
+        f"• 📱 Telegram 메시지 분석 ({provider_label} 기반)\n"
+        "• 🎤 음성 메시지 → 텍스트 변환 및 분석 (Whisper)\n"
+        "• 🖼️ 이미지 분석 (Vision)\n"
         "• 📄 문서 분석 (PDF/DOCX/TXT)\n"
         "• 📁 Google Drive 자동 감시\n"
         "• 📧 Gmail 새 메일 분석\n"
@@ -504,9 +514,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Received image from user {user_id}")
 
-    if not model:
-        await update.message.reply_text("❌ Gemini AI가 초기화되지 않았습니다.")
-        return
+    # Use provider-aware vision regardless of local Gemini model state
 
     try:
         file = await context.bot.get_file(photo.file_id)
@@ -594,8 +602,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(content) > preview_limit:
                 preview = content[:preview_limit]
                 message = f"📄 파일 내용 (앞부분 {preview_limit}자):\n\n{preview}\n\n… (이하 생략)"
+                summary = preview  # provide preview as summary for downstream integrations
             else:
                 message = f"📄 파일 내용:\n\n{content}"
+                summary = content
             for chunk in chunk_text(message):
                 await update.message.reply_text(chunk)
         else:
@@ -806,10 +816,12 @@ def drive_watcher_thread(application):
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     try:
-                        if mode == 'HTML':
-                            loop.run_until_complete(application.bot.send_message(chat_id=OWNER_ID, text=message, parse_mode='HTML'))
-                        else:
-                            loop.run_until_complete(application.bot.send_message(chat_id=OWNER_ID, text=message, parse_mode='MarkdownV2'))
+                        formatted_message, parse_mode = format_ai_text(message)
+                        loop.run_until_complete(application.bot.send_message(
+                            chat_id=OWNER_ID,
+                            text=formatted_message,
+                            parse_mode=parse_mode
+                        ))
                     finally:
                         loop.close()
 
